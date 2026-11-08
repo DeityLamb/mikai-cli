@@ -41,12 +41,9 @@ use crate::{
 
 mod page;
 
-const ACCENT: Color = Color::Rgb(224, 69, 123);
-const PANEL: Color = Color::Rgb(32, 30, 38);
-const SELECTED: Color = Color::Rgb(70, 36, 54);
-/// Alternating backgrounds of transcript blocks, and of the focused one.
-const BLOCK_BG: [Color; 2] = [Color::Rgb(24, 23, 30), Color::Rgb(33, 31, 41)];
-const FOCUS_BG: Color = Color::Rgb(52, 33, 48);
+mod ui;
+
+use ui::{ACCENT, FAINT, GREEN, MUTED, RED, SURFACE, SURFACE_ALT, YELLOW};
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const MAX_ENTRIES: usize = 300;
 const MAX_INPUTS: usize = 500;
@@ -239,6 +236,7 @@ enum Msg {
     Found(u64, Result<Vec<AnimeShort>>),
     Player(String, Result<Player>),
     History(Result<Vec<serde_json::Value>>),
+    Teams(Result<Vec<Team>>),
 }
 
 #[derive(Clone)]
@@ -303,6 +301,8 @@ struct App {
     anime_refs: Vec<String>,
     release_refs: Vec<String>,
     recent: Vec<Recent>,
+    /// Team id → name, for releases known only by id (`t_35:voice`).
+    team_names: std::collections::HashMap<i64, String>,
 
     palette: Option<Palette>,
     page: Option<page::Page>,
@@ -352,6 +352,7 @@ impl App {
             anime_refs: saved.anime_refs,
             release_refs: saved.release_refs,
             recent: saved.recent,
+            team_names: Default::default(),
             palette: None,
             page: None,
             tick: 0,
@@ -593,6 +594,14 @@ impl App {
                             at,
                         };
                         self.remember(rec);
+                    }
+                }
+            }
+            Msg::Teams(res) => {
+                self.loading = self.loading.saturating_sub(1);
+                for t in res.unwrap_or_default() {
+                    if let Some(id) = t.id {
+                        self.team_names.insert(id, t.name);
                     }
                 }
             }
@@ -961,6 +970,39 @@ impl App {
         if self.client.has_key() {
             self.spawn_raw(|c| Msg::History(c.history(1, 50).map(|p| p.items)));
         }
+        if self.team_names.is_empty() {
+            self.spawn_raw(|c| {
+                let mut all = vec![];
+                for page in 1..=10 {
+                    match c.teams(page) {
+                        Ok(p) => {
+                            let last = p.pages.is_none_or(|n| u64::from(page) >= n);
+                            all.extend(p.items);
+                            if last {
+                                break;
+                            }
+                        }
+                        Err(e) => return Msg::Teams(Err(e)),
+                    }
+                }
+                Msg::Teams(Ok(all))
+            });
+        }
+    }
+
+    /// `Inari`, or for a bare release id like `t_35:voice` the team's name.
+    fn recent_team(&self, x: &Recent) -> Option<String> {
+        if let Some(n) = &x.team_name {
+            return Some(n.clone());
+        }
+        let id = x.team.as_deref()?;
+        let (team, kind) = id.split_once(':').unwrap_or((id, ""));
+        let name = team.strip_prefix("t_").and_then(|n| n.parse::<i64>().ok()).and_then(|n| self.team_names.get(&n).cloned());
+        Some(match name {
+            Some(n) if kind == "sub" => format!("{n} (суб.)"),
+            Some(n) => n,
+            None => kind_label(kind).to_string(),
+        })
     }
 
     // ---------- palette ----------
@@ -987,7 +1029,7 @@ impl App {
                 .recent
                 .iter()
                 .map(|x| {
-                    let team = x.team_name.clone().or_else(|| x.team.clone()).unwrap_or_default();
+                    let team = self.recent_team(x).unwrap_or_default();
                     let hint = [Some(format!("{} еп.", fmt_num(x.ep))), (!team.is_empty()).then_some(team), Some(ago(x.at))]
                         .into_iter()
                         .flatten()
@@ -1236,11 +1278,11 @@ impl App {
     }
 
     fn draw_transcript(&mut self, f: &mut Frame, area: Rect) {
-        let width = area.width.saturating_sub(2).max(10);
+        let width = area.width.saturating_sub(3).max(10);
         let spinner = SPINNER[self.tick % SPINNER.len()];
         let mut all: Vec<Line> = vec![];
         let mut owner: Vec<Option<usize>> = vec![];
-        // Rows drawn on the plain terminal background: headers of expanded blocks.
+        // Rows drawn on the plain terminal background: margins and headers of expanded blocks.
         let mut bare: Vec<usize> = vec![];
         let mut ranges: Vec<(usize, usize)> = vec![];
         let mut zebra = 0;
@@ -1260,14 +1302,12 @@ impl App {
             }
             shade[i] = zebra;
             zebra += 1;
-            let focused = self.focus == Some(i);
             let collapsed = e.collapsed && !e.pending;
             if !collapsed {
-                // One-line margin above the command, then the command itself, both unshaded.
                 bare.extend([all.len(), all.len() + 1]);
                 all.push(Line::raw(""));
             }
-            all.push(header_line(e, width, collapsed, focused));
+            all.push(header_line(e, width, collapsed));
             if !collapsed {
                 all.push(Line::raw(""));
                 all.extend(body.iter().cloned());
@@ -1304,50 +1344,56 @@ impl App {
         self.row_owner = owner[start..end].to_vec();
         self.transcript_y = area.y;
 
-        f.render_widget(Paragraph::new(visible), Rect { x: area.x + 1, width: area.width.saturating_sub(1), ..area });
-        let buf = f.buffer_mut();
+        // Column 0 is for the focus bar; blocks start at column 1.
         for (row, o) in self.row_owner.iter().enumerate() {
             let Some(i) = o else { continue };
             if bare.binary_search(&(start + row)).is_ok() {
                 continue;
             }
-            let bg = if self.focus == Some(*i) { FOCUS_BG } else { BLOCK_BG[shade[*i] % 2] };
-            buf.set_style(Rect { x: area.x, y: area.y + row as u16, width: area.width, height: 1 }, Style::new().bg(bg));
+            let bg = if shade[*i] % 2 == 0 { SURFACE } else { SURFACE_ALT };
+            ui::fill(f, Rect { x: area.x + 1, y: area.y + row as u16, width: area.width.saturating_sub(1), height: 1 }, bg);
+        }
+        f.render_widget(Paragraph::new(visible), Rect { x: area.x + 2, width: area.width.saturating_sub(2), ..area });
+        if let Some(fi) = self.focus {
+            for (row, o) in self.row_owner.iter().enumerate() {
+                if *o == Some(fi) {
+                    ui::focus_bar(f, area.x, area.y + row as u16, 1);
+                }
+            }
         }
     }
 
     fn draw_session(&self, f: &mut Frame, area: Rect) {
         let line = match &self.session {
             Some(s) => {
-                let mut spans = vec![
-                    Span::styled(" ● ", Style::new().fg(ACCENT)),
-                    Span::styled(s.title.clone(), Style::new().add_modifier(Modifier::BOLD)),
-                ];
+                let mut spans = vec![Span::styled(" ● ", Style::new().fg(ACCENT)), Span::styled(s.title.clone(), ui::bold())];
                 let team = s.team.as_ref().and_then(|t| {
                     s.player.as_ref().and_then(|p| p.releases.iter().find(|r| &r.id == t)).map(|r| r.team_names()).or(Some(t.clone()))
                 });
                 if let Some(t) = team {
-                    spans.push(Span::styled(format!(" · {t}"), Style::new().fg(Color::Gray)));
+                    spans.push(Span::styled(format!("  ·  {t}"), ui::muted()));
                 }
                 if let Some(Some(e)) = &s.entry {
                     let total = s.episodes.total.filter(|&t| t > 0).map(|t| t.to_string()).unwrap_or_else(|| "?".into());
+                    spans.push(Span::styled("  ·  ", ui::muted()));
                     spans.push(Span::styled(
-                        format!(" · {} {}/{total}", list_status_label(&e.status), e.episodes.map(fmt_num).unwrap_or_else(|| "0".into())),
-                        Style::new().fg(Color::Green),
+                        format!("{} {}/{total}", list_status_label(&e.status), e.episodes.map(fmt_num).unwrap_or_else(|| "0".into())),
+                        Style::new().fg(GREEN),
                     ));
                 }
                 if let Some(n) = s.last_ep {
-                    spans.push(Span::styled(format!(" · відкрито {} еп.", fmt_num(n)), Style::new().fg(Color::DarkGray)));
+                    spans.push(Span::styled("  ·  ", ui::muted()));
+                    spans.push(Span::styled(format!("відкрито {} еп.", fmt_num(n)), Style::new().fg(YELLOW)));
                 }
                 Line::from(spans)
             }
-            None => Line::styled(" ○ немає відкритого аніме", Style::new().fg(Color::DarkGray)),
+            None => Line::styled(" ○ немає відкритого аніме", Style::new().fg(FAINT)),
         };
         f.render_widget(line, area);
     }
 
     fn draw_input(&self, f: &mut Frame, area: Rect) {
-        let rule = if self.focus.is_some() { Color::DarkGray } else { Color::Rgb(90, 70, 85) };
+        let rule = if self.focus.is_some() { FAINT } else { MUTED };
         f.render_widget(Block::new().borders(Borders::TOP | Borders::BOTTOM).border_style(Style::new().fg(rule)), area);
         let area = Rect { y: area.y + 1, height: 1, ..area };
         let prompt = Span::styled(" › ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD));
@@ -1366,7 +1412,7 @@ impl App {
             }
         }
         let text = if self.input.is_empty() {
-            Span::styled("введіть /команду або натисніть Ctrl+P", Style::new().fg(Color::DarkGray))
+            Span::styled("/команда", Style::new().fg(FAINT))
         } else {
             Span::raw(shown)
         };
@@ -1382,113 +1428,87 @@ impl App {
             left.push(Span::styled(format!("{} ", SPINNER[self.tick % SPINNER.len()]), Style::new().fg(ACCENT)));
         }
         if self.scroll > 0 {
-            left.push(Span::styled(format!("↓ ще {} рядків · Esc — донизу", self.scroll), Style::new().fg(Color::Yellow)));
+            left.push(Span::styled(format!("↓ ще {} рядків  ", self.scroll), Style::new().fg(YELLOW)));
+            left.extend(ui::hint("Esc", "донизу"));
         }
         f.render_widget(Line::from(left), area);
-        let user = self.user.clone().unwrap_or_else(|| "не увійшли".into());
-        let right = if self.page.is_some() {
-            format!("{} ", self.page_hints())
+        let keys: Vec<(&str, &str)> = if self.palette.is_some() {
+            vec![]
+        } else if self.page.is_some() {
+            self.page_hints()
         } else if self.focus.is_some() {
-            "enter згорнути/розгорнути · ctrl+↑↓ блоки · esc назад ".to_string()
+            vec![("⏎", "згорнути"), ("Ctrl+↑↓", "блоки"), ("Esc", "назад")]
         } else {
-            format!("ctrl+p меню · ctrl+↑ блоки · ctrl+o згорнути · {user} ")
+            vec![("Ctrl+P", "меню"), ("Ctrl+H", "нещодавні"), ("Ctrl+↑", "блоки"), ("Ctrl+O", "згорнути")]
         };
-        f.render_widget(Line::styled(right, Style::new().fg(Color::DarkGray)).right_aligned(), area);
+        let mut right = ui::hints(&keys);
+        if self.page.is_none() && self.focus.is_none() && self.palette.is_none() {
+            right.push(Span::styled(format!("   {}", self.user.clone().unwrap_or_else(|| "не увійшли".into())), ui::muted()));
+        }
+        right.push(Span::raw(" "));
+        let rw = ui::width(&right);
+        if rw <= area.width {
+            f.render_widget(Line::from(right), Rect { x: area.x + area.width - rw, width: rw, ..area });
+        }
     }
 
     fn draw_palette(&self, f: &mut Frame, area: Rect) {
         let Some(p) = &self.palette else { return };
-        let items = self.palette_items();
-        let w = 72.min(area.width.saturating_sub(4));
-        let h = 20.min(area.height.saturating_sub(2));
-        let rect = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height.saturating_sub(h)) / 3, width: w, height: h };
-        f.render_widget(Clear, rect);
-        f.render_widget(Block::new().style(Style::new().bg(PANEL)), rect);
-        let inner = Rect { x: rect.x + 2, y: rect.y + 1, width: rect.width.saturating_sub(4), height: rect.height.saturating_sub(2) };
-
         let title = match &p.mode {
             PMode::Actions => "Меню".to_string(),
             PMode::Recent => "Нещодавно переглянуті".to_string(),
             PMode::Search => "Пошук аніме".to_string(),
-            PMode::Releases => "Оберіть команду".to_string(),
+            PMode::Releases => "Команда".to_string(),
             PMode::Episodes(i) => self
                 .session
                 .as_ref()
                 .and_then(|s| s.player.as_ref())
                 .and_then(|pl| pl.releases.get(*i))
-                .map(|r| format!("{} · {}", r.team_names(), r.kind_label()))
+                .map(|r| format!("Серії · {} · {}", r.team_names(), r.kind_label()))
                 .unwrap_or_default(),
         };
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled(title, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled(if p.mode == PMode::Actions { "" } else { "   Esc — назад" }, Style::new().fg(Color::DarkGray)),
-            ]),
-            Line::from(vec![
-                Span::styled("› ", Style::new().fg(ACCENT)),
-                if p.query.is_empty() {
-                    Span::styled(
-                        if p.mode == PMode::Search { "назва українською, англійською чи оригінальною" } else { "фільтр" },
-                        Style::new().fg(Color::DarkGray),
-                    )
-                } else {
-                    Span::raw(p.query.clone())
-                },
-            ]),
-            Line::raw(""),
-        ];
-        let list_h = inner.height.saturating_sub(3) as usize;
-        let start = p.sel.saturating_sub(list_h.saturating_sub(1));
-        if items.is_empty() {
-            let msg = match p.mode {
-                PMode::Search if p.query.is_empty() => "почніть вводити назву",
-                PMode::Recent if self.loading > 0 => "завантаження…",
-                PMode::Recent => "ще нічого не дивились: /watch або /play",
-                PMode::Search if p.query != p.searched || self.loading > 0 => "шукаю…",
-                PMode::Releases if self.session.as_ref().is_some_and(|s| s.player.is_none()) => "завантаження…",
-                _ => "нічого немає",
-            };
-            lines.push(Line::styled(msg, Style::new().fg(Color::DarkGray)));
-        }
-        for (i, it) in items.iter().enumerate().skip(start).take(list_h) {
-            let sel = i == p.sel;
-            let base = if sel { Style::new().bg(SELECTED) } else { Style::new() };
-            let label_w = inner.width as usize * 3 / 5;
-            let label = crate::style::pad(&it.label, label_w);
-            let hint = crate::style::pad(&it.hint, (inner.width as usize).saturating_sub(label_w));
-            lines.push(Line::from(vec![
-                Span::styled(label, base.add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() })),
-                Span::styled(hint, base.fg(Color::DarkGray)),
-            ]));
-        }
-        f.render_widget(Paragraph::new(lines), inner);
-        if p.mode == PMode::Search || !p.query.is_empty() || p.mode == PMode::Actions {
-            f.set_cursor_position((inner.x + 2 + p.query.width() as u16, inner.y + 1));
+        let empty = match p.mode {
+            PMode::Search if p.query.is_empty() => "почніть вводити назву",
+            PMode::Recent if self.loading > 0 => "завантаження…",
+            PMode::Recent => "ще нічого не дивились: /watch або /play",
+            PMode::Search if p.query != p.searched || self.loading > 0 => "шукаю…",
+            PMode::Releases if self.session.as_ref().is_some_and(|s| s.player.is_none()) => "завантаження…",
+            _ => "нічого немає",
+        };
+        let placeholder = if p.mode == PMode::Search { "назва українською, англійською чи оригінальною" } else { "фільтр" };
+        let mut footer = vec![("↑↓", "вибір"), ("⏎", "обрати")];
+        footer.push(("Esc", if p.mode == PMode::Actions { "закрити" } else { "назад" }));
+        let items = self.palette_items().into_iter().map(|it| ui::Item::new(it.label, it.hint)).collect();
+        let overlay = ui::Overlay {
+            title,
+            aside: String::new(),
+            filter: Some((&p.query, placeholder)),
+            items,
+            sel: p.sel,
+            empty: empty.into(),
+            footer,
+            width: 76,
+        };
+        let layout = overlay.draw(f, area);
+        if let Some(c) = layout.cursor {
+            f.set_cursor_position(c);
         }
     }
 }
 
 fn draw_completions(f: &mut Frame, above: Rect, comps: &[&Spec], sel: usize) {
     let h = (comps.len() as u16).min(8);
-    let w = 70.min(above.width.saturating_sub(2));
-    let rect = Rect { x: above.x + 1, y: above.y + above.height.saturating_sub(h), width: w, height: h };
+    let w = 76.min(above.width.saturating_sub(4));
+    let rect = Rect { x: above.x + 1, y: above.y + above.height.saturating_sub(h + 1), width: w, height: h + 1 };
     f.render_widget(Clear, rect);
-    let start = sel.saturating_sub(h as usize - 1);
-    let lines: Vec<Line> = comps
+    ui::fill(f, rect, ui::OVERLAY);
+    let items: Vec<ui::Item> = comps
         .iter()
-        .enumerate()
-        .skip(start)
-        .take(h as usize)
-        .map(|(i, c)| {
-            let base = if i == sel { Style::new().bg(SELECTED) } else { Style::new().bg(PANEL) };
-            Line::from(vec![
-                Span::styled(format!(" {} ", crate::style::pad(&format!("/{}", c.name), 10)), base.fg(ACCENT)),
-                Span::styled(crate::style::pad(c.args, 26), base),
-                Span::styled(crate::style::pad(c.help, (w as usize).saturating_sub(38)), base.fg(Color::DarkGray)),
-            ])
-        })
+        .map(|c| ui::Item::new(format!("/{:<10} {}", c.name, c.args), c.help))
         .collect();
-    f.render_widget(Paragraph::new(lines).style(Style::new().bg(PANEL)), rect);
+    ui::rows(f, Rect { x: rect.x + 1, y: rect.y, width: rect.width - 2, height: h }, &items, sel, ui::OVERLAY);
+    let hints = ui::hints(&[("Tab", "доповнити"), ("⏎", "виконати")]);
+    f.render_widget(Line::from(hints), Rect { x: rect.x + 2, y: rect.y + h, width: rect.width - 2, height: 1 });
 }
 
 fn fuzzy(q: &str, s: &str) -> bool {
@@ -1503,25 +1523,24 @@ fn tone_style(t: Tone) -> Style {
     match t {
         Tone::Plain => s,
         Tone::Bold => s.add_modifier(Modifier::BOLD),
-        Tone::Dim => s.fg(Color::DarkGray),
+        Tone::Dim => s.fg(MUTED),
         Tone::Accent => s.fg(ACCENT),
-        Tone::Green => s.fg(Color::Green),
-        Tone::Yellow => s.fg(Color::Yellow),
-        Tone::Red => s.fg(Color::Red),
-        Tone::Cyan => s.fg(Color::Cyan),
-        Tone::Magenta => s.fg(Color::Magenta),
+        Tone::Green => s.fg(GREEN),
+        Tone::Yellow => s.fg(YELLOW),
+        Tone::Red => s.fg(RED),
+        // Old saved transcripts may still carry these; show them neutral.
+        Tone::Cyan | Tone::Magenta => s,
     }
 }
 
-fn header_line(e: &Entry, width: u16, collapsed: bool, focused: bool) -> Line<'static> {
+fn header_line(e: &Entry, width: u16, collapsed: bool) -> Line<'static> {
     let time = e.at.with_timezone(&Local).format("%H:%M").to_string();
     let arrow = if collapsed { "▸ " } else { "▾ " };
     let mut spans = vec![
-        Span::styled(arrow, Style::new().fg(if focused { ACCENT } else { Color::DarkGray })),
-        Span::styled("› ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-        Span::styled(e.cmd.clone(), Style::new().add_modifier(Modifier::BOLD)),
+        Span::styled(arrow, Style::new().fg(FAINT)),
+        Span::styled(e.cmd.clone(), ui::bold()),
     ];
-    let mut used = 4 + e.cmd.width();
+    let mut used = 2 + e.cmd.width();
     let right = time.len() + 2;
     if collapsed {
         // A peek at the output: its first non-empty line.
@@ -1530,11 +1549,11 @@ fn header_line(e: &Entry, width: u16, collapsed: bool, focused: bool) -> Line<'s
         if room > 3 && !peek.is_empty() {
             let peek = crate::style::truncate(peek.trim(), room);
             used += 3 + peek.width();
-            spans.push(Span::styled(format!("   {peek}"), Style::new().fg(Color::DarkGray)));
+            spans.push(Span::styled(format!("   {peek}"), ui::muted()));
         }
     }
     spans.push(Span::raw(" ".repeat((width as usize).saturating_sub(used + right))));
-    spans.push(Span::styled(time, Style::new().fg(Color::DarkGray)));
+    spans.push(Span::styled(time, Style::new().fg(FAINT)));
     Line::from(spans)
 }
 
@@ -1931,7 +1950,7 @@ fn exec(name: &str, args: &str, snap: &Snap) -> Result<Outcome> {
                 let Some(client_id) = config.client_id() else {
                     out.lines = vec![
                         plain("Вхід за посиланням ще не налаштовано (немає clientId)."),
-                        plain("Створіть ключ на ").push("https://mikai.me/user/developers", Tone::Cyan).push(" і введіть:", Tone::Plain),
+                        plain("Створіть ключ на ").push("https://mikai.me/user/developers", Tone::Bold).push(" і введіть:", Tone::Plain),
                         SLine::of("/login mk_…", Tone::Accent),
                     ];
                     return Ok(out);
@@ -1939,7 +1958,7 @@ fn exec(name: &str, args: &str, snap: &Snap) -> Result<Outcome> {
                 let token = cli::device_login(c, &client_id, "write", true, |url| {
                     snap.report(vec![
                         plain("Підтвердіть вхід у браузері:"),
-                        SLine::of(url, Tone::Cyan),
+                        SLine::of(url, Tone::Bold),
                         dim("чекаю на підтвердження…"),
                     ]);
                 })?;

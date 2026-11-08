@@ -7,6 +7,7 @@
 
 use super::*;
 use crate::play;
+use super::ui::{self, FAINT, GREEN, MUTED, SELECT, SURFACE, YELLOW};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Focus {
@@ -146,14 +147,6 @@ fn teams_word(n: usize) -> &'static str {
 fn follow(scroll: usize, sel: usize, h: usize) -> usize {
     let s = scroll.min(sel);
     if h > 0 && sel >= s + h { sel + 1 - h } else { s }
-}
-
-/// One row of a modal.
-struct MItem {
-    label: String,
-    hint: String,
-    accent: String,
-    disabled: bool,
 }
 
 impl App {
@@ -302,32 +295,41 @@ impl App {
         }
     }
 
-    fn modal_items(&self) -> Vec<MItem> {
+    fn modal_items(&self) -> Vec<ui::Item> {
         let Some((page, session, Some(pl))) = self.page_parts() else { return vec![] };
+        let numbered = |i: usize, mut it: ui::Item| {
+            it.key = (i < 9).then(|| (i + 1).to_string());
+            it
+        };
         match &page.modal {
             None => vec![],
             Some(Modal::Kind) => self
                 .kinds()
                 .iter()
-                .map(|k| {
+                .enumerate()
+                .map(|(i, k)| {
                     let n = self.teams_of(k).len();
-                    MItem { label: kind_title(k).into(), hint: format!("{n} {}", teams_word(n)), accent: String::new(), disabled: false }
+                    numbered(i, ui::Item::new(kind_title(k), format!("{n} {}", teams_word(n))))
                 })
                 .collect(),
             Some(Modal::Team(k)) => self
                 .teams_of(k)
                 .iter()
-                .map(|&i| {
+                .enumerate()
+                .map(|(n, &i)| {
                     let r = &pl.releases[i];
-                    let eps = r.last_episode.map(|e| format!("{} еп.", fmt_num(e))).unwrap_or_else(|| "–".into());
-                    let upd = r.updated_at.as_deref().and_then(view::parse_time).map(view::fmt_date).unwrap_or_default();
-                    let mine = session.team.as_deref() == Some(r.id.as_str());
-                    MItem {
-                        label: format!("{}{}", r.team_names(), if mine { "  ·  ви дивились" } else { "" }),
-                        hint: format!("{eps:>8}   {upd}"),
-                        accent: if page.mpv && playable(r) { "◆".into() } else { String::new() },
-                        disabled: false,
+                    let mut meta = vec![r.last_episode.map(|e| format!("{} еп.", fmt_num(e))).unwrap_or_else(|| "–".into())];
+                    if let Some(d) = r.updated_at.as_deref().and_then(view::parse_time) {
+                        meta.push(d.with_timezone(&Local).format("%d.%m.%y").to_string());
                     }
+                    if page.mpv && playable(r) {
+                        meta.push("mpv".into());
+                    }
+                    let mut it = ui::Item::new(r.team_names(), meta.join(" · "));
+                    if session.team.as_deref() == Some(r.id.as_str()) {
+                        it.tag = Some(("● дивились".into(), YELLOW));
+                    }
+                    numbered(n, it)
                 })
                 .collect(),
             Some(Modal::Player) => self
@@ -335,14 +337,10 @@ impl App {
                 .map(|(_, e)| {
                     e.sources
                         .iter()
-                        .map(|s| {
-                            let mpv = play::supports_mpv(&s.provider);
-                            MItem {
-                                label: s.provider.clone(),
-                                hint: if mpv { "браузер або mpv".into() } else { "лише браузер".into() },
-                                accent: if mpv { "◆ mpv".into() } else { String::new() },
-                                disabled: false,
-                            }
+                        .enumerate()
+                        .map(|(i, s)| {
+                            let meta = if play::supports_mpv(&s.provider) { "браузер і mpv" } else { "лише браузер" };
+                            numbered(i, ui::Item::new(s.provider.clone(), meta))
                         })
                         .collect()
                 })
@@ -505,11 +503,11 @@ impl App {
         }
     }
 
-    pub(super) fn page_hints(&self) -> &'static str {
+    pub(super) fn page_hints(&self) -> Vec<(&'static str, &'static str)> {
         if self.page.as_ref().is_some_and(|p| p.modal.is_some()) {
-            "↑↓ вибір · ⏎ обрати · ← назад · esc закрити"
+            vec![]
         } else {
-            "←→↑↓ серія · tab кнопки · ctrl+h нещодавні · ctrl+p меню · esc назад"
+            vec![("←→↑↓", "серія"), ("Tab", "кнопки"), ("Ctrl+H", "нещодавні"), ("Ctrl+P", "меню"), ("Esc", "назад")]
         }
     }
 
@@ -521,42 +519,40 @@ impl App {
             return;
         }
         let mut hits: Vec<(Rect, Hit)> = vec![];
-        let x = area.x + 2;
-        let w = area.width.saturating_sub(4);
+        // Panels span x-1..x+w+1 and keep one column free on the left for the focus bar.
+        let x = area.x + 3;
+        let w = area.width.saturating_sub(6);
         let bottom = area.y + area.height;
         let mut y = area.y + 1;
 
+        y = self.draw_topbar(f, x, y, w, &mut hits);
         y = self.draw_info(f, x, y, w, bottom, &mut hits);
 
         let (page, _, player) = self.page_parts().unwrap();
-        if page.detail.licensed {
-            f.render_widget(
-                Line::styled("Ліцензовано в Україні — дивіться легально:  o mikai.me", Style::new().fg(Color::Yellow)),
-                Rect { x, y, width: w, height: 1 },
-            );
-            hits.push((Rect { x, y, width: w, height: 1 }, Hit::Button(Btn::Site)));
-            self.page.as_mut().unwrap().hits = hits;
-            return;
-        }
-        if player.is_none() {
-            f.render_widget(Line::styled("завантаження серій…", dim()), Rect { x, y, width: w, height: 1 });
+        if page.detail.licensed || player.is_none() {
+            let text = if page.detail.licensed {
+                "Ліцензовано в Україні — дивіться легально"
+            } else {
+                "завантаження серій…"
+            };
+            let mut spans = vec![Span::styled(text.to_string(), Style::new().fg(if page.detail.licensed { YELLOW } else { MUTED }))];
+            if page.detail.licensed {
+                spans.push(Span::raw("   "));
+                spans.extend(ui::hint("o", "mikai.me"));
+                hits.push((Rect { x, y, width: w, height: 1 }, Hit::Button(Btn::Site)));
+            }
+            f.render_widget(Line::from(spans), Rect { x, y, width: w, height: 1 });
             self.page.as_mut().unwrap().hits = hits;
             return;
         }
 
-        // Team and player, each on its own panel.
-        self.draw_choice(f, x, y, w, &mut hits);
-        y += 5;
+        y = self.draw_choice(f, x, y, w, &mut hits);
 
-        // Episodes.
         let buttons_h = 4;
-        let avail = bottom.saturating_sub(y + 3 + buttons_h).max(2) as usize;
-        let focus_eps = self.page.as_ref().is_some_and(|p| p.focus == Focus::Episodes);
         let (rows, cols) = self.episode_rows(w);
-        let grid_h = rows.clamp(1, avail);
-        fill(f, Rect { x: x - 1, y: y - 1, width: w + 2, height: grid_h as u16 + 4 }, if focus_eps { PANEL_FOCUS } else { PANEL_BG });
+        let grid_h = rows.clamp(1, bottom.saturating_sub(y + 4 + buttons_h).max(1) as usize);
         let ep_scroll = self.draw_episodes(f, x, y, w, grid_h, cols, &mut hits);
-        y += grid_h as u16 + 4;
+        y += grid_h as u16 + 5;
 
         self.draw_buttons(f, x, y, &mut hits);
         y += 2;
@@ -567,147 +563,184 @@ impl App {
             p.ep_scroll = ep_scroll;
         }
         if self.page.as_ref().is_some_and(|p| p.modal.is_some()) {
-            // Clicks outside the modal close it.
-            hits.clear();
-            hits.push((area, Hit::Outside));
-            self.draw_modal(f, area, &mut hits);
+            hits = self.draw_modal(f, area);
         }
         if let Some(p) = &mut self.page {
             p.hits = hits;
         }
     }
 
-    /// Title, meta and description on a panel. Returns the next free row.
-    fn draw_info(&self, f: &mut Frame, x: u16, y: u16, w: u16, bottom: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
+    /// `[Esc] назад` on the left, list status on the right.
+    fn draw_topbar(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
         let (page, session, _) = self.page_parts().unwrap();
-        let d = &page.detail;
-        let indent = "       ";
-        let mut row = y;
-
-        let entry = session.entry.clone().flatten();
-        let status = match &entry {
-            Some(e) => format!(
-                "● {} · {}/{}",
-                list_status_label(&e.status),
-                e.episodes.map(fmt_num).unwrap_or_else(|| "0".into()),
-                d.episodes.total.filter(|&t| t > 0).map(|t| t.to_string()).unwrap_or_else(|| "?".into())
+        let back = ui::hint("Esc", "назад");
+        hits.push((Rect { x, y, width: ui::width(&back), height: 1 }, Hit::Back));
+        f.render_widget(Line::from(back), Rect { x, y, width: w, height: 1 });
+        let total = page.detail.episodes.total.filter(|&t| t > 0).map(|t| t.to_string()).unwrap_or_else(|| "?".into());
+        let status = match session.entry.clone().flatten() {
+            Some(e) => Span::styled(
+                format!("● {} · {}/{total}", list_status_label(&e.status), e.episodes.map(fmt_num).unwrap_or_else(|| "0".into())),
+                Style::new().fg(GREEN),
             ),
-            None if self.client.has_key() => "○ немає в списках".into(),
-            None => String::new(),
+            None if self.client.has_key() => Span::styled("○ немає в списках", ui::muted()),
+            None => Span::raw(""),
         };
-        let mut title = vec![
-            Span::styled("‹ ", Style::new().fg(ACCENT)),
-            Span::styled("Esc  ", dim()),
-            Span::styled(d.titles.main().to_string(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-        ];
-        let used: usize = title.iter().map(|s| s.content.width()).sum();
-        title.push(Span::raw(" ".repeat((w as usize).saturating_sub(used + status.width()))));
-        title.push(Span::styled(status, Style::new().fg(Color::Green)));
-        f.render_widget(Line::from(title), Rect { x, y: row, width: w, height: 1 });
-        hits.push((Rect { x, y: row, width: 6, height: 1 }, Hit::Back));
-        row += 1;
-
-        let mut rendered = vec![];
-        let card = view::anime_card(d, None, false);
-        // The card starts with the title; keep the lines up to the description.
-        for l in card.iter().skip(1).take_while(|l| !l.segs.is_empty()) {
-            wrap_line(l, w as usize, indent, &mut rendered);
-        }
-        let desc_top = rendered.len() + 1;
-        let mut desc_rows = 0;
-        if let Some(desc) = &d.description {
-            let mut lines = vec![];
-            for p in desc.trim().lines().filter(|l| !l.trim().is_empty()) {
-                wrap_line(&SLine::of(p, Tone::Plain), w as usize, indent, &mut lines);
-            }
-            let max = if page.full_desc { lines.len() } else { 2 };
-            let hint = if lines.len() > max { "ще" } else if page.full_desc { "згорнути" } else { "" };
-            rendered.push(Line::raw(""));
-            desc_rows = lines.len().min(max);
-            rendered.extend(lines.into_iter().take(max));
-            if !hint.is_empty() {
-                rendered.push(Line::from(vec![Span::raw(indent), key_span("i"), Span::styled(format!(" {hint}"), dim())]));
-                desc_rows += 1;
-            }
-        }
-        // Leave room for the rest of the page.
-        let max_h = bottom.saturating_sub(row + 14) as usize;
-        let h = rendered.len().min(max_h.max(3));
-        f.render_widget(Paragraph::new(rendered.into_iter().take(h).collect::<Vec<_>>()), Rect { x, y: row, width: w, height: h as u16 });
-        if desc_rows > 0 {
-            hits.push((Rect { x, y: row + desc_top as u16, width: w, height: desc_rows as u16 }, Hit::Desc));
-        }
-        let end = row + h as u16;
-        f.buffer_mut().set_style(Rect { x: x - 1, y: y - 1, width: w + 2, height: end - y + 2 }, Style::new().bg(PANEL_BG));
-        end + 3
+        f.render_widget(Line::from(status).right_aligned(), Rect { x, y, width: w, height: 1 });
+        y + 2
     }
 
-    /// Two panels: the chosen team and the chosen player, each under its key chip.
-    fn draw_choice(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) {
-        let (page, _, Some(pl)) = self.page_parts().unwrap() else { return };
+    /// Info panel: title, meta, scores, genres, description.
+    fn draw_info(&self, f: &mut Frame, x: u16, y: u16, w: u16, bottom: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
+        let (page, _, _) = self.page_parts().unwrap();
+        let d = &page.detail;
+        let mut lines: Vec<Line> = vec![Line::styled(d.titles.main().to_string(), ui::bold())];
+        if let Some(sec) = d.titles.secondary() {
+            lines.push(Line::styled(sec.to_string(), ui::muted()));
+        }
+        lines.push(Line::raw(""));
+        let eps = match (d.episodes.localized, d.episodes.total) {
+            (Some(l), Some(t)) => Some(format!("{l}/{} еп. українською", if t == 0 { "?".into() } else { t.to_string() })),
+            _ => None,
+        };
+        let meta = [
+            d.format.as_deref().map(str::to_uppercase),
+            d.year.map(|y| y.to_string()),
+            d.status.as_deref().map(|s| anime_status_label(s).to_string()),
+            d.studio.clone(),
+            d.age_rating.as_deref().map(str::to_uppercase),
+            eps,
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+        lines.push(Line::raw(meta));
+        let mut scores = vec![];
+        for (name, v, prec) in [("Mikai", d.scores.mikai, 1), ("MAL", d.scores.mal, 2), ("Hikka", d.scores.hikka, 2)] {
+            if let Some(v) = v {
+                if !scores.is_empty() {
+                    scores.push(Span::styled("  ·  ", ui::muted()));
+                }
+                scores.push(Span::styled(format!("{name} "), ui::muted()));
+                scores.push(Span::styled(format!("{v:.prec$}"), ui::bold()));
+            }
+        }
+        if !d.genres.is_empty() {
+            if !scores.is_empty() {
+                scores.push(Span::styled("  ·  ", ui::muted()));
+            }
+            scores.push(Span::styled(d.genres.iter().map(NamedUa::label).collect::<Vec<_>>().join(", "), ui::muted()));
+        }
+        lines.push(Line::from(scores));
+
+        let mut desc_rows = 0;
+        let mut more = "";
+        if let Some(desc) = &d.description {
+            let mut wrapped = vec![];
+            for p in desc.trim().lines().filter(|l| !l.trim().is_empty()) {
+                wrap_line(&SLine::of(p, Tone::Plain), w.saturating_sub(4) as usize, "", &mut wrapped);
+            }
+            let max = if page.full_desc { wrapped.len() } else { 2 };
+            more = if wrapped.len() > max { "опис" } else if page.full_desc { "згорнути" } else { "" };
+            lines.push(Line::raw(""));
+            desc_rows = wrapped.len().min(max);
+            lines.extend(wrapped.into_iter().take(max));
+        }
+        // Keep room for the rest of the page.
+        let h = lines.len().min(bottom.saturating_sub(y + 18).max(4) as usize) as u16;
+        ui::fill(f, Rect { x: x - 1, y, width: w + 2, height: h + 2 }, SURFACE);
+        let inner = Rect { x: x + 1, y: y + 1, width: w.saturating_sub(2), height: h };
+        f.render_widget(Paragraph::new(lines.into_iter().take(h as usize).collect::<Vec<_>>()), inner);
+        if !more.is_empty() {
+            // Like other panels: the key sits at the right of the header row.
+            let chip = ui::hint("i", more);
+            let cw = ui::width(&chip);
+            let r = Rect { x: inner.x + inner.width - cw, y: inner.y, width: cw, height: 1 };
+            f.render_widget(Line::from(chip), r);
+            hits.push((r, Hit::Desc));
+        }
+        if desc_rows > 0 {
+            hits.push((Rect { x: inner.x, y: inner.y + h - desc_rows as u16, width: inner.width, height: desc_rows as u16 }, Hit::Desc));
+        }
+        y + h + 3
+    }
+
+    /// Two panels: chosen team and chosen player, each opening its picker.
+    fn draw_choice(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
+        let (page, _, Some(pl)) = self.page_parts().unwrap() else { return y };
         let gap = 4;
         let team_w = (w - gap) * 3 / 5;
         let player_x = x + team_w + gap;
         let player_w = w - team_w - gap;
-        for (px, pw, m) in [(x, team_w, Modal::Kind), (player_x, player_w, Modal::Player)] {
-            let panel = Rect { x: px - 1, y: y - 1, width: pw + 2, height: 4 };
-            fill(f, panel, PANEL_BG);
-            hits.push((panel, Hit::Open(m)));
-        }
 
-        f.render_widget(Line::from(chip("c", "Команда", false, false)), Rect { x, y, width: team_w, height: 1 });
-        if let Some(r) = pl.releases.get(page.rel) {
-            let line = Line::from(vec![
-                Span::styled(r.team_names(), Style::new().add_modifier(Modifier::BOLD)),
+        let team = pl.releases.get(page.rel);
+        let team_value = Line::from(match team {
+            Some(r) => vec![
+                Span::styled(r.team_names(), ui::bold()),
                 Span::styled(
-                    format!("  {} · {} еп.", r.kind_label(), r.last_episode.map(fmt_num).unwrap_or_else(|| "?".into())),
-                    Style::new().fg(Color::Gray),
+                    format!("   {} · {} еп.", r.kind_label(), r.last_episode.map(fmt_num).unwrap_or_else(|| "?".into())),
+                    ui::muted(),
                 ),
-            ]);
-            f.render_widget(line, Rect { x: x + 1, y: y + 1, width: team_w.saturating_sub(1), height: 1 });
-        }
+            ],
+            None => vec![Span::styled("—", ui::muted())],
+        });
+        let src = self.current_source();
+        let player_value = Line::from(match src {
+            Some(s) => vec![
+                Span::styled(s.provider.clone(), ui::bold()),
+                Span::styled(
+                    if play::supports_mpv(&s.provider) { "   браузер і mpv" } else { "   лише браузер" },
+                    ui::muted(),
+                ),
+            ],
+            None => vec![Span::styled("—", ui::muted())],
+        });
 
-        f.render_widget(Line::from(chip("p", "Плеєр", false, false)), Rect { x: player_x, y, width: player_w, height: 1 });
-        if let Some(s) = self.current_source() {
-            let mut spans = vec![Span::styled(s.provider.clone(), Style::new().add_modifier(Modifier::BOLD))];
-            if play::supports_mpv(&s.provider) {
-                spans.push(Span::styled("  ◆ mpv", Style::new().fg(ACCENT)));
-            } else {
-                spans.push(Span::styled("  лише браузер", dim()));
-            }
-            f.render_widget(Line::from(spans), Rect { x: player_x + 1, y: y + 1, width: player_w.saturating_sub(1), height: 1 });
+        for (px, pw, title, key, value, modal) in [
+            (x, team_w, "Команда", "c", team_value, Modal::Kind),
+            (player_x, player_w, "Плеєр", "p", player_value, Modal::Player),
+        ] {
+            let panel = Rect { x: px - 1, y, width: pw + 2, height: 4 };
+            ui::fill(f, panel, SURFACE);
+            ui::section(f, Rect { x: px + 1, y: y + 1, width: pw - 2, height: 1 }, title, "", vec![ui::key(key)], false);
+            f.render_widget(value, Rect { x: px + 1, y: y + 2, width: pw - 2, height: 1 });
+            hits.push((panel, Hit::Open(modal)));
         }
+        y + 5
     }
 
     /// Rows the grid needs and its column count at width `w`.
     fn episode_rows(&self, w: u16) -> (usize, usize) {
         let Some((p, _, Some(pl))) = self.page_parts() else { return (1, 1) };
-        pl.releases.get(p.rel).map_or((1, 1), |rel| grid_shape(rel, w))
+        pl.releases.get(p.rel).map_or((1, 1), |rel| grid_shape(rel, w.saturating_sub(2)))
     }
 
-    /// Returns the scroll offset it used.
+    /// Episode panel. Returns the scroll offset it used.
     #[allow(clippy::too_many_arguments)]
     fn draw_episodes(&self, f: &mut Frame, x: u16, y: u16, w: u16, h: usize, cols: usize, hits: &mut Vec<(Rect, Hit)>) -> usize {
         let (page, session, Some(pl)) = self.page_parts().unwrap() else { return 0 };
         let Some(rel) = pl.releases.get(page.rel) else { return 0 };
         let on = page.focus == Focus::Episodes;
-        let title = Style::new().add_modifier(Modifier::BOLD).fg(if on { ACCENT } else { Color::Reset });
-        f.render_widget(
-            Line::from(vec![
-                Span::styled("Серії", title),
-                Span::styled(format!("   {} · {}", rel.team_names(), rel.kind_label()), dim()),
-            ]),
-            Rect { x, y, width: w, height: 1 },
-        );
-        f.render_widget(
-            Line::styled(format!("{} / {}", page.ep + 1, rel.episodes.len()), dim()).right_aligned(),
-            Rect { x, y, width: w, height: 1 },
+        let panel_h = h as u16 + 4;
+        ui::fill(f, Rect { x: x - 1, y, width: w + 2, height: panel_h }, SURFACE);
+        if on {
+            ui::focus_bar(f, x - 2, y, panel_h);
+        }
+        let ix = x + 1;
+        let iw = w.saturating_sub(2);
+        ui::section(
+            f,
+            Rect { x: ix, y: y + 1, width: iw, height: 1 },
+            "Серії",
+            "",
+            vec![Span::styled(format!("{} / {}", page.ep + 1, rel.episodes.len()), ui::muted())],
+            on,
         );
         let watched = watched_of(session);
         let cell_w = cell_width(rel);
         let scroll = follow(page.ep_scroll, page.ep / cols, h);
         for row in scroll..(scroll + h) {
-            let ry = y + 2 + (row - scroll) as u16;
+            let ry = y + 3 + (row - scroll) as u16;
             for col in 0..cols {
                 let i = row * cols + col;
                 let Some(e) = rel.episodes.get(i) else { break };
@@ -715,17 +748,17 @@ impl App {
                 let opened = session.last_ep == Some(e.number);
                 let mark = if seen { "✓" } else if opened { "▸" } else { " " };
                 let mut style = if seen {
-                    Style::new().fg(Color::Green)
+                    Style::new().fg(GREEN)
                 } else if opened {
-                    Style::new().fg(Color::Yellow)
+                    Style::new().fg(YELLOW)
                 } else {
                     Style::new()
                 };
                 if i == page.ep {
-                    style = style.bg(if on { SELECTED } else { Color::Rgb(56, 48, 64) }).add_modifier(Modifier::BOLD);
+                    style = style.bg(SELECT).add_modifier(Modifier::BOLD);
                 }
-                let rect = Rect { x: x + (col * cell_w) as u16, y: ry, width: cell_w as u16 - 1, height: 1 };
-                f.render_widget(Span::styled(format!("{mark} {} ", crate::style::pad(&e.label(), cell_w - 4)), style), rect);
+                let rect = Rect { x: ix + (col * cell_w) as u16, y: ry, width: cell_w as u16 - 1, height: 1 };
+                f.render_widget(Span::styled(format!(" {mark} {}", crate::style::pad(&e.label(), cell_w - 4)), style), rect);
                 hits.push((rect, Hit::Episode(i)));
             }
         }
@@ -737,10 +770,14 @@ impl App {
         let mpv_ok = self.mpv_ready();
         let ep = self.current().map(|(_, e)| fmt_num(e.number.floor())).unwrap_or_default();
         let entry = session.entry.clone().flatten();
+        let on = page.focus == Focus::Buttons;
+        if on {
+            ui::focus_bar(f, x - 2, y, 1);
+        }
         let mut bx = x;
         for (i, b) in BUTTONS.iter().enumerate() {
             let primary = (*b == Btn::Mpv && mpv_ok) || (*b == Btn::Browser && !mpv_ok);
-            let (key, label) = match b {
+            let (k, label) = match b {
                 Btn::Mpv => (if mpv_ok { "⏎" } else { "m" }, "mpv".to_string()),
                 Btn::Browser => (if mpv_ok { "b" } else { "⏎" }, "браузер".to_string()),
                 Btn::Watched => ("w", format!("переглянуто {ep}")),
@@ -754,11 +791,19 @@ impl App {
                 Btn::Site => ("o", "mikai.me".to_string()),
             };
             let disabled = *b == Btn::Mpv && !mpv_ok;
-            let focused = page.focus == Focus::Buttons && page.btn == i;
-            // Highlighted: the focused button, or the primary one when buttons are not focused.
-            let active = focused || (primary && page.focus != Focus::Buttons);
-            let spans = chip(key, &label, active, disabled);
-            let tw = spans.iter().map(|s| s.content.width()).sum::<usize>() as u16;
+            let focused = on && page.btn == i;
+            let label_style = if focused {
+                Style::new().bg(SELECT).add_modifier(Modifier::BOLD)
+            } else if disabled {
+                Style::new().bg(ui::KEY_BG).fg(FAINT)
+            } else {
+                Style::new().bg(ui::KEY_BG)
+            };
+            let spans = vec![
+                if primary { ui::key_primary(k) } else { ui::key(k) },
+                Span::styled(format!(" {label} "), label_style),
+            ];
+            let tw = ui::width(&spans);
             let rect = Rect { x: bx, y, width: tw, height: 1 };
             f.render_widget(Line::from(spans), rect);
             hits.push((rect, Hit::Button(*b)));
@@ -773,7 +818,7 @@ impl App {
         if e.pending {
             out.push(Line::from(vec![
                 Span::styled(SPINNER[self.tick % SPINNER.len()], Style::new().fg(ACCENT)),
-                Span::styled(format!(" {}", e.cmd), dim()),
+                Span::styled(format!(" {}", e.cmd), ui::muted()),
             ]));
         } else if let Some(l) = e.lines.iter().find(|l| !l.segs.is_empty()) {
             wrap_line(&l.clone().nowrap(), w as usize, "", &mut out);
@@ -781,104 +826,44 @@ impl App {
         f.render_widget(Paragraph::new(out), Rect { x, y, width: w, height: 1 });
     }
 
-    fn draw_modal(&self, f: &mut Frame, area: Rect, hits: &mut Vec<(Rect, Hit)>) {
-        let Some(page) = &self.page else { return };
-        let Some(m) = &page.modal else { return };
-        let items = self.modal_items();
-        // Dim the page behind.
-        f.buffer_mut().set_style(area, Style::new().fg(Color::Rgb(70, 68, 78)));
-
-        let (title, step) = match m {
-            Modal::Kind => ("Трек".to_string(), if self.kinds().len() > 1 { "1/2" } else { "" }),
-            Modal::Team(k) => (format!("{} — команда", kind_title(k)), if self.kinds().len() > 1 { "2/2" } else { "" }),
-            Modal::Player => (
-                format!("Плеєр · {} еп.", self.current().map(|(_, e)| e.label()).unwrap_or_default()),
-                "",
-            ),
+    /// Team or player picker over the dimmed page. Returns the click map.
+    fn draw_modal(&self, f: &mut Frame, area: Rect) -> Vec<(Rect, Hit)> {
+        let Some(page) = &self.page else { return vec![] };
+        let Some(m) = &page.modal else { return vec![] };
+        f.buffer_mut().set_style(area, Style::new().fg(FAINT));
+        let two_steps = self.kinds().len() > 1;
+        let (title, aside) = match m {
+            Modal::Kind => ("Трек".to_string(), if two_steps { "крок 1/2" } else { "" }),
+            Modal::Team(k) => (format!("Команда · {}", kind_title(k)), if two_steps { "крок 2/2" } else { "" }),
+            Modal::Player => (format!("Плеєр · {} еп.", self.current().map(|(_, e)| e.label()).unwrap_or_default()), ""),
         };
-        let w = 60.min(area.width.saturating_sub(4));
-        let list_h = items.len().min(area.height.saturating_sub(10) as usize).max(1);
-        let h = list_h as u16 + 6;
-        let rect = Rect { x: area.x + (area.width - w) / 2, y: area.y + area.height.saturating_sub(h) / 3, width: w, height: h };
-        f.render_widget(Clear, rect);
-        f.render_widget(Block::new().style(Style::new().bg(PANEL)), rect);
-        let ix = rect.x + 2;
-        let iw = rect.width.saturating_sub(4);
-        f.render_widget(
-            Line::from(vec![
-                Span::styled(title, Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled(if step.is_empty() { String::new() } else { format!("   крок {step}") }, dim()),
-            ]),
-            Rect { x: ix, y: rect.y + 1, width: iw, height: 1 },
-        );
-        let scroll = follow(0, page.modal_sel, list_h);
-        for (row, (i, it)) in items.iter().enumerate().skip(scroll).take(list_h).enumerate() {
-            let sel = i == page.modal_sel;
-            let base = if sel { Style::new().bg(SELECTED) } else { Style::new() };
-            let key = if i < 9 { format!(" {} ", i + 1) } else { "   ".into() };
-            let accent_w = 6;
-            let hint_w = items.iter().map(|x| x.hint.width()).max().unwrap_or(0).min(iw as usize / 2);
-            let label_w = (iw as usize).saturating_sub(3 + 1 + hint_w + 2 + accent_w);
-            let ry = rect.y + 3 + row as u16;
-            let line = Line::from(vec![
-                Span::styled(key, base.fg(ACCENT).add_modifier(Modifier::BOLD)),
-                Span::styled(format!(" {}", crate::style::pad(&it.label, label_w)), base.add_modifier(if sel { Modifier::BOLD } else { Modifier::empty() }).fg(if it.disabled { Color::DarkGray } else { Color::Reset })),
-                Span::styled(format!("{}  ", crate::style::pad(&it.hint, hint_w)), base.fg(Color::Gray)),
-                Span::styled(crate::style::pad(&it.accent, accent_w), base.fg(ACCENT)),
-            ]);
-            let r = Rect { x: ix, y: ry, width: iw, height: 1 };
-            f.render_widget(line, r);
-            hits.push((r, Hit::Item(i)));
+        let mut footer = vec![("↑↓", "вибір"), ("⏎", "обрати")];
+        if matches!(m, Modal::Team(_)) && two_steps {
+            footer.push(("←", "трек"));
         }
-        let foot = match m {
-            Modal::Team(_) if self.kinds().len() > 1 => "◆ — є плеєр для mpv · ← трек",
-            Modal::Team(_) => "◆ — є плеєр для mpv",
-            Modal::Player => "◆ — відкривається в mpv",
-            Modal::Kind => "",
+        footer.push(("Esc", "закрити"));
+        let overlay = ui::Overlay {
+            title,
+            aside: aside.into(),
+            filter: None,
+            items: self.modal_items(),
+            sel: page.modal_sel,
+            empty: "нічого немає".into(),
+            footer,
+            width: 64,
         };
-        f.render_widget(Line::styled(foot, dim()), Rect { x: ix, y: rect.y + h - 2, width: iw, height: 1 });
-        // Clicks inside the panel but not on a row do nothing.
-        hits.insert(1, (rect, Hit::Inside));
+        let layout = overlay.draw(f, area);
+        let mut hits = vec![(area, Hit::Outside), (layout.rect, Hit::Inside)];
+        hits.extend(layout.rows.into_iter().map(|(r, i)| (r, Hit::Item(i))));
+        hits
     }
 }
 
 fn cell_width(rel: &Release) -> usize {
-    rel.episodes.iter().map(|e| e.label().width()).max().unwrap_or(1) + 4
+    rel.episodes.iter().map(|e| e.label().width()).max().unwrap_or(1) + 5
 }
 
 fn grid_shape(rel: &Release, w: u16) -> (usize, usize) {
     let cols = (w as usize / cell_width(rel)).max(1);
     (rel.episodes.len().div_ceil(cols).max(1), cols)
-}
-
-const PANEL_BG: Color = Color::Rgb(26, 25, 32);
-const PANEL_FOCUS: Color = Color::Rgb(36, 32, 44);
-const CHIP_BG: Color = Color::Rgb(44, 41, 53);
-
-fn fill(f: &mut Frame, rect: Rect, bg: Color) {
-    let area = f.area();
-    f.buffer_mut().set_style(rect.intersection(area), Style::new().bg(bg));
-}
-
-/// A key-labelled chip like ` c  Команда `: the key on its own tint.
-fn chip(key: &str, label: &str, active: bool, disabled: bool) -> Vec<Span<'static>> {
-    let (key_bg, bg) = if active { (ACCENT, SELECTED) } else { (CHIP_BG, CHIP_BG) };
-    let key_fg = if active { Color::Black } else { ACCENT };
-    let fg = if disabled { Color::DarkGray } else { Color::Reset };
-    let mut text = Style::new().bg(bg).fg(fg);
-    if active {
-        text = text.add_modifier(Modifier::BOLD);
-    }
-    vec![
-        Span::styled(format!(" {key} "), Style::new().bg(key_bg).fg(key_fg).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" {label} "), text),
-    ]
-}
-
-fn dim() -> Style {
-    Style::new().fg(Color::DarkGray)
-}
-
-fn key_span(k: &str) -> Span<'static> {
-    Span::styled(k.to_string(), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD))
 }

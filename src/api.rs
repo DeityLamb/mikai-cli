@@ -181,6 +181,11 @@ impl Client {
         self.page("updates", &[("page", page.to_string()), ("limit", limit.to_string())])
     }
 
+    /// Voice and subtitle teams, 50 per page.
+    pub fn teams(&self, page: u32) -> Result<Page<Team>> {
+        self.page("teams", &[("page", page.to_string()), ("limit", "50".into())])
+    }
+
     // ---- account ----
 
     pub fn me(&self) -> Result<Me> {

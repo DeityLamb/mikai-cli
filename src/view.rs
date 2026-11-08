@@ -131,7 +131,7 @@ fn index_col(line: SLine, i: usize, numbered: bool, id: Option<i64>) -> SLine {
     if numbered {
         line.rcol(&format!("#{}", i + 1), 4, Tone::Dim)
     } else {
-        line.rcol(&id.map(|i| i.to_string()).unwrap_or_default(), 6, Tone::Cyan)
+        line.rcol(&id.map(|i| i.to_string()).unwrap_or_default(), 6, Tone::Dim)
     }
 }
 
@@ -205,14 +205,14 @@ pub fn anime_card(a: &AnimeDetail, entry: Option<Option<&ListEntry>>, numbered: 
     let mut scores = SLine::new();
     for (name, val, prec) in [("Mikai", a.scores.mikai, 1), ("MAL", a.scores.mal, 2), ("Hikka", a.scores.hikka, 2)] {
         if let Some(s) = val {
-            scores = scores.push(format!("{name} "), Tone::Plain).push(format!("{s:.prec$}"), Tone::Yellow).push("   ", Tone::Plain);
+            scores = scores.push(format!("{name} "), Tone::Dim).push(format!("{s:.prec$}"), Tone::Bold).push("   ", Tone::Plain);
         }
     }
     if !scores.segs.is_empty() {
         out.push(scores);
     }
     if !a.genres.is_empty() {
-        out.push(SLine::of(a.genres.iter().map(NamedUa::label).collect::<Vec<_>>().join(", "), Tone::Magenta));
+        out.push(SLine::of(a.genres.iter().map(NamedUa::label).collect::<Vec<_>>().join(", "), Tone::Dim));
     }
     match entry {
         Some(Some(e)) => out.push(entry_summary(e, &a.episodes)),
@@ -248,8 +248,8 @@ fn license_lines(l: &Value) -> Lines {
         let name = ["name", "title", "platform", "type"].iter().find_map(|k| it.get(*k).and_then(Value::as_str));
         let url = it.get("url").and_then(Value::as_str);
         match (name, url) {
-            (Some(n), Some(u)) => out.push(plain(format!("  {n}  ")).push(u, Tone::Cyan)),
-            (None, Some(u)) => out.push(SLine::of(format!("  {u}"), Tone::Cyan)),
+            (Some(n), Some(u)) => out.push(plain(format!("  {n}  ")).push(u, Tone::Plain)),
+            (None, Some(u)) => out.push(SLine::of(format!("  {u}"), Tone::Plain)),
             _ => out.push(dim(format!("  {it}"))),
         }
     }
@@ -262,7 +262,7 @@ pub fn entry_summary(e: &ListEntry, eps: &EpisodesInfo) -> SLine {
         .push("У списку: ", Tone::Plain)
         .push(list_status_label(&e.status), Tone::Bold)
         .push(format!(" · {}/{total}", e.episodes.map(fmt_num).unwrap_or_else(|| "0".into())), Tone::Green)
-        .push(e.score.map(|s| format!(" · ★ {}", fmt_num(s))).unwrap_or_default(), Tone::Yellow)
+        .push(e.score.map(|s| format!(" · ★ {}", fmt_num(s))).unwrap_or_default(), Tone::Plain)
         .push(if e.rewatching { " · повтор" } else { "" }, Tone::Dim)
 }
 
@@ -273,7 +273,7 @@ pub fn releases(rels: &[Release], numbered: bool) -> Lines {
             let line = if numbered { SLine::new().rcol(&format!("#{}", i + 1), 4, Tone::Dim) } else { SLine::new().push("  ", Tone::Plain) };
             line.col(&r.team_names(), 24, Tone::Bold)
                 .col(r.kind_label(), 10, Tone::Dim)
-                .col(&r.last_episode.map(|e| format!("до {} еп.", fmt_num(e))).unwrap_or_else(|| "–".into()), 11, Tone::Green)
+                .col(&r.last_episode.map(|e| format!("до {} еп.", fmt_num(e))).unwrap_or_else(|| "–".into()), 11, Tone::Plain)
                 .push(fmt_date_str(r.updated_at.as_deref()), Tone::Dim)
                 .push(if numbered { String::new() } else { format!("  {}", r.id) }, Tone::Dim)
                 .nowrap()
@@ -344,7 +344,7 @@ pub fn schedule(
         }
         items.sort_by_key(|i| i.airing);
         let label = WEEKDAYS.iter().find(|(k, _)| *k == key).map(|(_, l)| *l).unwrap_or(&key);
-        out.push(SLine::of(label, Tone::Accent));
+        out.push(SLine::of(label, Tone::Bold));
         for it in items {
             let time = it
                 .airing
@@ -352,8 +352,8 @@ pub fn schedule(
                 .unwrap_or_else(|| "--:--".into());
             let line = if numbered { SLine::new().rcol(&format!("#{}", refs.len() + 1), 4, Tone::Dim) } else { SLine::new().push("  ", Tone::Plain) };
             out.push(
-                line.col(&time, 5, Tone::Cyan)
-                    .col(&it.episode.map(|e| format!("{} еп.", fmt_num(e))).unwrap_or_default(), 8, Tone::Green)
+                line.col(&time, 5, Tone::Plain)
+                    .col(&it.episode.map(|e| format!("{} еп.", fmt_num(e))).unwrap_or_default(), 8, Tone::Dim)
                     .push(it.anime.titles.main(), Tone::Plain)
                     .nowrap(),
             );
@@ -377,7 +377,7 @@ pub fn updates(items: &[Update], numbered: bool) -> Lines {
                 .unwrap_or_else(|| u.teams.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(" × "));
             let line = if numbered { SLine::new().rcol(&format!("#{}", i + 1), 4, Tone::Dim) } else { SLine::new() };
             line.col(&u.published_at.map(fmt_date).unwrap_or_default(), 11, Tone::Dim)
-                .col(&u.episode.map(|e| format!("{} еп.", fmt_num(e))).unwrap_or_default(), 8, Tone::Green)
+                .col(&u.episode.map(|e| format!("{} еп.", fmt_num(e))).unwrap_or_default(), 8, Tone::Dim)
                 .col(u.anime.titles.main(), 40, Tone::Bold)
                 .push(format!("{team} · {} · {}", kind_label(&u.kind), u.provider.as_deref().unwrap_or("")), Tone::Dim)
                 .nowrap()
@@ -398,8 +398,8 @@ pub fn list_entry_row(e: &ListEntry, i: usize, numbered: bool) -> SLine {
         .col(list_status_label(&e.status), 11, Tone::Dim)
         .col(&format!("{}/{total}", e.episodes.map(fmt_num).unwrap_or_else(|| "0".into())), 9, Tone::Green)
         .push(e.anime.titles.main(), Tone::Bold)
-        .push(e.score.map(|s| format!("  ★ {}", fmt_num(s))).unwrap_or_default(), Tone::Yellow)
-        .push(e.new_episodes.filter(|&n| n > 0).map(|n| format!("  +{n} нових")).unwrap_or_default(), Tone::Accent)
+        .push(e.score.map(|s| format!("  ★ {}", fmt_num(s))).unwrap_or_default(), Tone::Plain)
+        .push(e.new_episodes.filter(|&n| n > 0).map(|n| format!("  +{n} нових")).unwrap_or_default(), Tone::Yellow)
         .nowrap()
 }
 
@@ -420,7 +420,7 @@ pub fn history(items: &[Value], numbered: bool) -> Lines {
             let when = ["watchedAt", "updatedAt", "createdAt"].iter().find_map(|k| item.get(*k).and_then(Value::as_str));
             index_col(SLine::new(), i, numbered, anime.ids.mikai)
                 .col(&fmt_date_str(when), 11, Tone::Dim)
-                .col(&ep, 8, Tone::Green)
+                .col(&ep, 8, Tone::Dim)
                 .push(anime.titles.main(), Tone::Bold)
                 .nowrap()
         })
