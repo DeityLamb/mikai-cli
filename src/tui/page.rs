@@ -641,10 +641,21 @@ impl App {
                 wrap_line(&SLine::of(p, Tone::Plain), w.saturating_sub(4) as usize, "", &mut wrapped);
             }
             let max = if page.full_desc { wrapped.len() } else { 2 };
-            more = if wrapped.len() > max { "опис" } else if page.full_desc { "згорнути" } else { "" };
+            let hidden = wrapped.len().saturating_sub(max);
+            more = if hidden > 0 { "розгорнути" } else if page.full_desc { "згорнути" } else { "" };
             lines.push(Line::raw(""));
             desc_rows = wrapped.len().min(max);
-            lines.extend(wrapped.into_iter().take(max));
+            let mut shown: Vec<Line> = wrapped.into_iter().take(max).collect();
+            if hidden > 0 {
+                // Fade the last visible line into an ellipsis and say how much is left.
+                if let Some(last) = shown.last_mut() {
+                    let text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
+                    *last = Line::styled(format!("{}…", text.trim_end()), ui::muted());
+                }
+                shown.push(Line::styled(format!("▾ ще {hidden} {}", lines_word(hidden)), Style::new().fg(ACCENT)));
+                desc_rows += 1;
+            }
+            lines.extend(shown);
         }
         // Keep room for the rest of the page.
         let h = lines.len().min(bottom.saturating_sub(y + 18).max(4) as usize) as u16;
@@ -856,6 +867,14 @@ impl App {
         let mut hits = vec![(area, Hit::Outside), (layout.rect, Hit::Inside)];
         hits.extend(layout.rows.into_iter().map(|(r, i)| (r, Hit::Item(i))));
         hits
+    }
+}
+
+fn lines_word(n: usize) -> &'static str {
+    match (n % 10, n % 100) {
+        (1, r) if r != 11 => "рядок",
+        (2..=4, r) if !(12..=14).contains(&r) => "рядки",
+        _ => "рядків",
     }
 }
 
