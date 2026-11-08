@@ -19,7 +19,10 @@ use chrono::{DateTime, Local, Utc};
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::{
-        event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind},
+        event::{
+            self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+            MouseEventKind, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        },
         execute,
     },
     layout::Rect,
@@ -66,7 +69,7 @@ const COMMANDS: &[Spec] = &[
     Spec { name: "list", aliases: &["ls"], args: "[статус]", help: "мої списки" },
     Spec { name: "login", aliases: &[], args: "[mk_…]", help: "увійти (за посиланням або ключем)" },
     Spec { name: "logout", aliases: &[], args: "", help: "вийти" },
-    Spec { name: "clear", aliases: &[], args: "", help: "очистити історію" },
+    Spec { name: "clear", aliases: &[], args: "[recent|all]", help: "стерти історію; recent — нещодавні, all — усе" },
     Spec { name: "help", aliases: &["?"], args: "", help: "довідка" },
     Spec { name: "quit", aliases: &["q", "exit"], args: "", help: "вихід" },
 ];
@@ -86,7 +89,8 @@ fn help_lines() -> Lines {
     out.push(blank());
     out.push(SLine::of("Клавіші", Tone::Bold));
     for (k, d) in [
-        ("Ctrl+P", "меню: дії, пошук аніме, вибір серії"),
+        ("Ctrl+P", "пошук аніме"),
+        ("Ctrl+Shift+P", "меню (або > у пошуку)"),
         ("Ctrl+H", "нещодавно переглянуті — продовжити з наступної серії"),
         ("на сторінці тайтлу", "c команда · p плеєр · ⏎ дивитись · w переглянуто · s список"),
         ("Tab", "доповнити команду"),
@@ -106,7 +110,7 @@ fn welcome_lines() -> Lines {
     vec![
         SLine::of("mikai", Tone::Accent).push("  аніме з українським озвученням у терміналі", Tone::Dim),
         blank(),
-        plain("Знайдіть тайтл: ").push("/search назва", Tone::Accent).push(" або ", Tone::Plain).push("Ctrl+P", Tone::Accent).push(".", Tone::Plain),
+        plain("Знайдіть тайтл: ").push("Ctrl+P", Tone::Accent).push(" або ", Tone::Plain).push("/search назва", Tone::Accent).push(". Меню — ", Tone::Plain).push("Ctrl+Shift+P", Tone::Accent).push(".", Tone::Plain),
         plain("Дивіться на сторінці тайтлу: ").push("/view назва", Tone::Accent).push(" — серії, озвучення, mpv чи браузер.", Tone::Plain),
         plain("Продовжити, де зупинились — ").push("Ctrl+H", Tone::Accent).push(". Усі команди — ", Tone::Plain).push("/help", Tone::Accent).push(".", Tone::Plain),
     ]
@@ -182,6 +186,9 @@ struct SavedState {
     anime_refs: Vec<String>,
     #[serde(default)]
     recent: Vec<Recent>,
+    /// Recent titles from before this moment were cleared on purpose.
+    #[serde(default)]
+    recent_cleared: Option<DateTime<Utc>>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -267,6 +274,7 @@ struct App {
 
     anime_refs: Vec<String>,
     recent: Vec<Recent>,
+    recent_cleared: Option<DateTime<Utc>>,
     /// Team id → name, for releases known only by id (`t_35:voice`).
     team_names: std::collections::HashMap<i64, String>,
 
@@ -280,8 +288,17 @@ struct App {
 pub fn run(client: Client, user: Option<String>) -> Result<()> {
     let mut terminal = ratatui::init();
     let _ = execute!(stdout(), EnableMouseCapture);
+    // Lets terminals that support it (kitty, Alacritty, WezTerm, foot, Ghostty…)
+    // tell Ctrl+Shift+P from Ctrl+P. Others fall back to `>` in the search.
+    let enhanced = ratatui::crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false);
+    if enhanced {
+        let _ = execute!(stdout(), PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
+    }
     let mut app = App::new(client, user);
     let result = app.run(&mut terminal);
+    if enhanced {
+        let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
+    }
     let _ = execute!(stdout(), DisableMouseCapture);
     ratatui::restore();
     app.save();
@@ -316,6 +333,7 @@ impl App {
             ac_sel: 0,
             anime_refs: saved.anime_refs,
             recent: saved.recent,
+            recent_cleared: saved.recent_cleared,
             team_names: Default::default(),
             palette: None,
             page: None,
@@ -345,6 +363,12 @@ impl App {
     fn sync_recent(&mut self) {
         let Some(path) = state_path() else { return };
         let Some(disk) = fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<SavedState>(&s).ok()) else { return };
+        // A clear in another window wins over our older records.
+        if disk.recent_cleared > self.recent_cleared {
+            self.recent_cleared = disk.recent_cleared;
+            let cut = self.recent_cleared;
+            self.recent.retain(|x| Some(x.at) > cut);
+        }
         for rec in disk.recent {
             self.remember(rec);
         }
@@ -361,6 +385,7 @@ impl App {
             "inputs": &self.inputs[self.inputs.len().saturating_sub(MAX_INPUTS)..],
             "anime_refs": &self.anime_refs,
             "recent": &self.recent,
+            "recent_cleared": &self.recent_cleared,
         });
         let _ = fs::create_dir_all(path.parent().unwrap());
         // Write to a side file and rename, so a reader never sees half a file.
@@ -450,10 +475,28 @@ impl App {
                 return;
             }
             "clear" => {
-                self.entries.clear();
-                self.focus = None;
-                self.save();
-                return;
+                let what = args.to_lowercase();
+                if !matches!(what.as_str(), "" | "recent" | "all") {
+                    Some(vec![err("/clear, /clear recent або /clear all")])
+                } else {
+                    if what != "recent" {
+                        self.entries.clear();
+                        self.focus = None;
+                    }
+                    if what == "all" {
+                        self.inputs.clear();
+                    }
+                    if what != "" {
+                        self.recent.clear();
+                        self.recent_cleared = Some(Utc::now());
+                    }
+                    self.save();
+                    if what == "recent" {
+                        Some(vec![dim("Нещодавні стерто")])
+                    } else {
+                        return;
+                    }
+                }
             }
             "help" => Some(help_lines()),
             _ => None,
@@ -642,8 +685,9 @@ impl App {
 
     fn on_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl && k.code == KeyCode::Char('p') {
-            self.toggle_palette();
+        if ctrl && matches!(k.code, KeyCode::Char('p' | 'P')) {
+            let shift = k.modifiers.contains(KeyModifiers::SHIFT) || k.code == KeyCode::Char('P');
+            self.open_palette(if shift { PMode::Actions } else { PMode::Search });
             return;
         }
         if ctrl && k.code == KeyCode::Char('h') {
@@ -869,6 +913,9 @@ impl App {
 
     /// Adds or refreshes a recent title; newer records win.
     fn remember(&mut self, rec: Recent) {
+        if self.recent_cleared.is_some_and(|c| rec.at <= c) {
+            return;
+        }
         if let Some(old) = self.recent.iter().find(|x| x.r == rec.r) {
             if old.at > rec.at {
                 return;
@@ -934,18 +981,21 @@ impl App {
 
     // ---------- palette ----------
 
-    fn toggle_palette(&mut self) {
-        if self.palette.take().is_none() {
-            self.palette = Some(Palette {
-                mode: PMode::Actions,
-                query: String::new(),
-                sel: 0,
-                results: vec![],
-                searched: String::new(),
-                typed_at: Instant::now(),
-                generation: 0,
-            });
+    /// Opens the palette in `mode`; the same shortcut again closes it.
+    fn open_palette(&mut self, mode: PMode) {
+        if self.palette.as_ref().is_some_and(|p| p.mode == mode) {
+            self.palette = None;
+            return;
         }
+        self.palette = Some(Palette {
+            mode,
+            query: String::new(),
+            sel: 0,
+            results: vec![],
+            searched: String::new(),
+            typed_at: Instant::now(),
+            generation: 0,
+        });
     }
 
     fn palette_items(&self) -> Vec<PItem> {
@@ -967,7 +1017,7 @@ impl App {
                 .collect(),
             PMode::Actions => {
                 let mut v = vec![
-                    PItem { label: "Пошук аніме…".into(), hint: "/search".into(), action: PAction::Search },
+                    PItem { label: "Пошук аніме…".into(), hint: "Ctrl+P".into(), action: PAction::Search },
                     PItem { label: "Продовжити перегляд…".into(), hint: "Ctrl+H".into(), action: PAction::Recent },
                 ];
                 v.extend([
@@ -987,7 +1037,8 @@ impl App {
                 }
                 v.extend([
                     run("Довідка", "/help", "/help"),
-                    run("Очистити історію", "/clear", "/clear"),
+                    run("Стерти історію", "/clear", "/clear"),
+                    run("Стерти нещодавні", "/clear recent", "/clear recent"),
                     run("Вихід", "/quit", "/quit"),
                 ]);
                 v
@@ -1016,16 +1067,23 @@ impl App {
         let items_len = self.palette_items().len();
         let Some(p) = &mut self.palette else { return };
         match k.code {
-            KeyCode::Esc => {
-                if p.mode == PMode::Actions {
-                    self.palette = None;
-                } else {
-                    p.mode = PMode::Actions;
-                    p.query.clear();
-                    p.sel = 0;
-                }
+            KeyCode::Esc => self.palette = None,
+            // VS Code style: `>` in the search opens the menu, Backspace returns.
+            KeyCode::Char('>') if p.mode == PMode::Search && p.query.is_empty() => {
+                p.mode = PMode::Actions;
+                p.sel = 0;
+            }
+            KeyCode::Backspace if p.mode == PMode::Actions && p.query.is_empty() => {
+                p.mode = PMode::Search;
+                p.sel = 0;
             }
             KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => self.palette = None,
+            KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                p.query.clear();
+                p.sel = 0;
+                p.typed_at = Instant::now();
+            }
+            KeyCode::Char(_) if k.modifiers.contains(KeyModifiers::CONTROL) => {}
             KeyCode::Up => p.sel = p.sel.saturating_sub(1),
             KeyCode::Down | KeyCode::Tab => p.sel = (p.sel + 1).min(items_len.saturating_sub(1)),
             KeyCode::PageUp => p.sel = p.sel.saturating_sub(10),
@@ -1277,7 +1335,7 @@ impl App {
         } else if self.focus.is_some() {
             vec![("⏎", "згорнути"), ("Ctrl+↑↓", "блоки"), ("Esc", "назад")]
         } else {
-            vec![("Ctrl+P", "меню"), ("Ctrl+H", "нещодавні"), ("Ctrl+↑", "блоки"), ("Ctrl+O", "згорнути")]
+            vec![("Ctrl+P", "пошук"), ("Ctrl+⇧P", "меню"), ("Ctrl+H", "нещодавні"), ("Ctrl+↑", "блоки")]
         };
         let mut right = ui::hints(&keys);
         if self.page.is_none() && self.focus.is_none() && self.palette.is_none() {
@@ -1300,13 +1358,20 @@ impl App {
         let empty = match p.mode {
             PMode::Search if p.query.is_empty() => "почніть вводити назву",
             PMode::Recent if self.loading > 0 => "завантаження…",
-            PMode::Recent => "ще нічого не дивились: /watch або /play",
+            PMode::Recent => "ще нічого не дивились",
             PMode::Search if p.query != p.searched || self.loading > 0 => "шукаю…",
             _ => "нічого немає",
         };
-        let placeholder = if p.mode == PMode::Search { "назва українською, англійською чи оригінальною" } else { "фільтр" };
+        let placeholder = match p.mode {
+            PMode::Search => "назва аніме",
+            PMode::Actions => "> команда",
+            PMode::Recent => "фільтр",
+        };
         let mut footer = vec![("↑↓", "вибір"), ("⏎", "обрати")];
-        footer.push(("Esc", if p.mode == PMode::Actions { "закрити" } else { "назад" }));
+        if p.mode == PMode::Search {
+            footer.push((">", "меню"));
+        }
+        footer.push(("Esc", "закрити"));
         let items = self.palette_items().into_iter().map(|it| ui::Item::new(it.label, it.hint)).collect();
         let overlay = ui::Overlay {
             title,

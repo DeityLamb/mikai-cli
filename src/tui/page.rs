@@ -538,7 +538,7 @@ impl App {
         if self.page.as_ref().is_some_and(|p| p.modal.is_some()) {
             vec![]
         } else {
-            vec![("←→↑↓", "серія"), ("Tab", "кнопки"), ("Ctrl+H", "нещодавні"), ("Ctrl+P", "меню"), ("Esc", "назад")]
+            vec![("←→↑↓", "серія"), ("Tab", "кнопки"), ("Ctrl+P", "пошук"), ("Ctrl+H", "нещодавні"), ("Esc", "назад")]
         }
     }
 
