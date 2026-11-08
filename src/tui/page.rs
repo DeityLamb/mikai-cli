@@ -669,7 +669,7 @@ impl App {
     fn draw_choice(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
         let (page, _, Some(pl)) = self.page_parts().unwrap() else { return y };
         let gap = 4;
-        let team_w = (w - gap) * 3 / 5;
+        let team_w = (w - gap) / 2;
         let player_x = x + team_w + gap;
         let player_w = w - team_w - gap;
 
