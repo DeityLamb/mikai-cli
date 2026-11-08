@@ -673,7 +673,7 @@ impl App {
             }
             KeyCode::Enter => {
                 // Enter on a half-typed command picks the highlighted completion.
-                if !comps.is_empty() && !comps.iter().any(|c| self.input[1..].eq_ignore_ascii_case(c.name)) {
+                if !comps.is_empty() && !comps.iter().any(|c| std::iter::once(c.name).chain(c.aliases.iter().copied()).any(|n| self.input[1..].eq_ignore_ascii_case(n))) {
                     let c = comps[self.ac_sel.min(comps.len() - 1)];
                     if c.args.starts_with('<') {
                         self.set_input(format!("/{} ", c.name));
@@ -1063,6 +1063,8 @@ impl App {
         let spinner = SPINNER[self.tick % SPINNER.len()];
         let mut all: Vec<Line> = vec![];
         let mut owner: Vec<Option<usize>> = vec![];
+        // Rows drawn on the plain terminal background: headers of expanded blocks.
+        let mut bare: Vec<usize> = vec![];
         let mut ranges: Vec<(usize, usize)> = vec![];
         let mut zebra = 0;
         let mut shade: Vec<usize> = vec![0; self.entries.len()];
@@ -1083,6 +1085,9 @@ impl App {
             zebra += 1;
             let focused = self.focus == Some(i);
             let collapsed = e.collapsed && !e.pending;
+            if !collapsed {
+                bare.push(all.len());
+            }
             all.push(header_line(e, width, collapsed, focused));
             if !collapsed {
                 all.push(Line::raw(""));
@@ -1124,6 +1129,9 @@ impl App {
         let buf = f.buffer_mut();
         for (row, o) in self.row_owner.iter().enumerate() {
             let Some(i) = o else { continue };
+            if bare.binary_search(&(start + row)).is_ok() {
+                continue;
+            }
             let bg = if self.focus == Some(*i) { FOCUS_BG } else { BLOCK_BG[shade[*i] % 2] };
             buf.set_style(Rect { x: area.x, y: area.y + row as u16, width: area.width, height: 1 }, Style::new().bg(bg));
         }
