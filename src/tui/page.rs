@@ -544,10 +544,9 @@ impl App {
             return;
         }
 
-        // Team and player.
-        fill(f, Rect { x: x - 1, y: y - 1, width: w + 2, height: 3 }, PANEL_BG);
+        // Team and player, each on its own panel.
         self.draw_choice(f, x, y, w, &mut hits);
-        y += 4;
+        y += 5;
 
         // Episodes.
         let buttons_h = 4;
@@ -643,34 +642,41 @@ impl App {
         end + 3
     }
 
-    /// `c Команда  Inari · озвучення · 28 еп.     p Плеєр  ashdi ◆ mpv`
+    /// Two panels: the chosen team and the chosen player, each under its key chip.
     fn draw_choice(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) {
         let (page, _, Some(pl)) = self.page_parts().unwrap() else { return };
-        let mut spans = chip("c", "Команда", false, false);
-        if let Some(r) = pl.releases.get(page.rel) {
-            spans.push(Span::styled(format!("  {}", r.team_names()), Style::new().add_modifier(Modifier::BOLD)));
-            spans.push(Span::styled(
-                format!(" · {} · {} еп.", r.kind_label(), r.last_episode.map(fmt_num).unwrap_or_else(|| "?".into())),
-                Style::new().fg(Color::Gray),
-            ));
+        let gap = 4;
+        let team_w = (w - gap) * 3 / 5;
+        let player_x = x + team_w + gap;
+        let player_w = w - team_w - gap;
+        for (px, pw, m) in [(x, team_w, Modal::Kind), (player_x, player_w, Modal::Player)] {
+            let panel = Rect { x: px - 1, y: y - 1, width: pw + 2, height: 4 };
+            fill(f, panel, PANEL_BG);
+            hits.push((panel, Hit::Open(m)));
         }
-        let team_w: u16 = spans.iter().map(|s| s.content.width() as u16).sum();
-        hits.push((Rect { x, y, width: team_w, height: 1 }, Hit::Open(Modal::Kind)));
-        f.render_widget(Line::from(spans), Rect { x, y, width: w, height: 1 });
 
-        let px = x + (w / 2).max(team_w + 4);
-        let mut spans = chip("p", "Плеєр", false, false);
+        f.render_widget(Line::from(chip("c", "Команда", false, false)), Rect { x, y, width: team_w, height: 1 });
+        if let Some(r) = pl.releases.get(page.rel) {
+            let line = Line::from(vec![
+                Span::styled(r.team_names(), Style::new().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    format!("  {} · {} еп.", r.kind_label(), r.last_episode.map(fmt_num).unwrap_or_else(|| "?".into())),
+                    Style::new().fg(Color::Gray),
+                ),
+            ]);
+            f.render_widget(line, Rect { x: x + 1, y: y + 1, width: team_w.saturating_sub(1), height: 1 });
+        }
+
+        f.render_widget(Line::from(chip("p", "Плеєр", false, false)), Rect { x: player_x, y, width: player_w, height: 1 });
         if let Some(s) = self.current_source() {
-            spans.push(Span::styled(format!("  {}", s.provider), Style::new().add_modifier(Modifier::BOLD)));
+            let mut spans = vec![Span::styled(s.provider.clone(), Style::new().add_modifier(Modifier::BOLD))];
             if play::supports_mpv(&s.provider) {
                 spans.push(Span::styled("  ◆ mpv", Style::new().fg(ACCENT)));
             } else {
                 spans.push(Span::styled("  лише браузер", dim()));
             }
+            f.render_widget(Line::from(spans), Rect { x: player_x + 1, y: y + 1, width: player_w.saturating_sub(1), height: 1 });
         }
-        let pw: u16 = spans.iter().map(|s| s.content.width() as u16).sum();
-        hits.push((Rect { x: px, y, width: pw, height: 1 }, Hit::Open(Modal::Player)));
-        f.render_widget(Line::from(spans), Rect { x: px, y, width: (x + w).saturating_sub(px), height: 1 });
     }
 
     /// Rows the grid needs and its column count at width `w`.
