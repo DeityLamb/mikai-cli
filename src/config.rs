@@ -7,9 +7,12 @@ use std::{fs, path::PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// `clientId` of the registered mikai-cli app. Not a secret. Can be baked in at
-/// build time with `MIKAI_CLIENT_ID=mkc_… cargo build`.
-pub const BUILTIN_CLIENT_ID: Option<&str> = option_env!("MIKAI_CLIENT_ID");
+/// `clientId` of the registered mikai-cli app (https://mikaicli.deitylamb.dev).
+/// Not a secret. Forks can override it at build time with `MIKAI_CLIENT_ID=mkc_… cargo build`.
+pub const BUILTIN_CLIENT_ID: &str = match option_env!("MIKAI_CLIENT_ID") {
+    Some(id) => id,
+    None => "mkc_51665457f597e95679c7a10c",
+};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -65,7 +68,7 @@ impl Config {
         std::env::var("MIKAI_CLIENT_ID")
             .ok()
             .or_else(|| self.client_id.clone())
-            .or(BUILTIN_CLIENT_ID.map(str::to_string))
+            .or_else(|| Some(BUILTIN_CLIENT_ID.to_string()))
             .filter(|s| !s.is_empty())
     }
 }

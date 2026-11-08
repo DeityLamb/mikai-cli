@@ -4,6 +4,7 @@ mod config;
 mod models;
 mod style;
 mod tui;
+mod view;
 
 use std::process::ExitCode;
 

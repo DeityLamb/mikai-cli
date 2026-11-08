@@ -1,9 +1,11 @@
 //! Command-line interface: argument definitions and the command handlers.
 
-use std::{thread, time::{Duration, Instant}};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, Local, Utc};
 use clap::{Args, Parser, Subcommand};
 use reqwest::Method;
 use serde_json::{Map, Value, json};
@@ -12,7 +14,8 @@ use crate::{
     api::{self, Client, normalize_ref},
     config::Config,
     models::*,
-    style::*,
+    style::{bold, dim, green, yellow},
+    view,
 };
 
 #[derive(Parser)]
@@ -240,27 +243,77 @@ pub fn run(cmd: Command, ctx: &mut Ctx) -> Result<()> {
     match cmd {
         Command::Tui => unreachable!("handled in main"),
         Command::Search(a) => search(ctx, a),
-        Command::Show { anime } => show(ctx, &resolve(ctx, &anime)?),
+        Command::Show { anime } => {
+            let r = resolve_cli(ctx, &anime)?;
+            if ctx.json {
+                return print_raw(ctx, &format!("anime/{r}"), &[]);
+            }
+            let a = ctx.client.anime(&r)?;
+            view::print(&view::anime_card(&a, None, false));
+            Ok(())
+        }
         Command::Random => {
             if ctx.json {
                 return print_raw(ctx, "anime/random", &[]);
             }
-            let a = ctx.client.random()?;
-            print_detail(&a);
+            view::print(&view::anime_card(&ctx.client.random()?, None, false));
             Ok(())
         }
-        Command::Episodes { anime, team, kind } => episodes(ctx, &resolve(ctx, &anime)?, team, kind),
-        Command::Open { anime, episode, team, kind, provider, print } => {
-            open_episode(ctx, &resolve(ctx, &anime)?, episode, team, kind, provider, print)
+        Command::Episodes { anime, team, kind } => {
+            let r = resolve_cli(ctx, &anime)?;
+            episodes(ctx, &r, team, kind)
         }
-        Command::Schedule { day } => schedule(ctx, day),
-        Command::Updates { limit, page } => updates(ctx, limit, page),
+        Command::Open { anime, episode, team, kind, provider, print } => {
+            let r = resolve_cli(ctx, &anime)?;
+            open_episode(ctx, &r, episode, team, kind, provider, print)
+        }
+        Command::Schedule { day } => {
+            if ctx.json {
+                return print_raw(ctx, "schedule", &[]);
+            }
+            let day = day.map(|d| view::weekday_key(&d));
+            let (lines, _) = view::schedule(ctx.client.schedule()?, day.as_deref(), false);
+            view::print(&lines);
+            Ok(())
+        }
+        Command::Updates { limit, page } => {
+            if ctx.json {
+                return print_raw(ctx, "updates", &[("limit", limit.to_string()), ("page", page.to_string())]);
+            }
+            view::print(&view::updates(&ctx.client.updates(page, limit)?.items, false));
+            Ok(())
+        }
         Command::Login { with_key, level, client_id, no_browser } => login(ctx, with_key, &level, client_id, no_browser),
         Command::Logout { local } => logout(ctx, local),
-        Command::Whoami => whoami(ctx),
+        Command::Whoami => {
+            if ctx.json {
+                return print_raw(ctx, "me", &[]);
+            }
+            view::print(&view::me(&ctx.client.me()?));
+            Ok(())
+        }
         Command::List(a) => list(ctx, a),
-        Command::History { limit } => history(ctx, limit),
-        Command::Notifications { filter, read_all } => notifications(ctx, &filter, read_all),
+        Command::History { limit } => {
+            require_key(ctx)?;
+            if ctx.json {
+                return print_raw(ctx, "me/history", &[("limit", limit.to_string())]);
+            }
+            view::print(&view::history(&ctx.client.history(1, limit)?.items, false));
+            Ok(())
+        }
+        Command::Notifications { filter, read_all } => {
+            require_key(ctx)?;
+            if read_all {
+                ctx.client.mark_all_read()?;
+                println!("Усі сповіщення прочитано.");
+                return Ok(());
+            }
+            if ctx.json {
+                return print_raw(ctx, "me/notifications", &[("filter", filter.clone())]);
+            }
+            view::print(&view::notifications(&ctx.client.notifications(&filter, 1, 30)?.items));
+            Ok(())
+        }
         Command::Translit { text, lang } => {
             let r = ctx.client.translit(&text.join(" "), lang.as_deref())?;
             match r.get("text").and_then(Value::as_str) {
@@ -284,16 +337,25 @@ pub fn run(cmd: Command, ctx: &mut Ctx) -> Result<()> {
 }
 
 /// Turns user input into an API `{ref}`. Anything that is not an id, a prefixed
-/// ref or a link is treated as a title and resolved to the best search hit.
-fn resolve(ctx: &Ctx, input: &str) -> Result<String> {
+/// ref or a link is treated as a title and resolved to the best search hit,
+/// which is returned too.
+pub fn resolve(client: &Client, input: &str) -> Result<(String, Option<AnimeShort>)> {
     let r = normalize_ref(input);
     if r.contains(':') || r.parse::<i64>().is_ok() {
-        return Ok(r);
+        return Ok((r, None));
     }
-    let page = ctx.client.search(&[("search", r.clone()), ("limit", "1".into())])?;
-    let hit = page.items.first().with_context(|| format!("аніме «{r}» не знайдено"))?;
-    eprintln!("{}", dim(&format!("→ {} (#{})", hit.titles.main(), hit.ids.mikai.unwrap_or(0))));
-    hit.reference().context("у результату немає id")
+    let page = client.search(&[("search", r.clone()), ("limit", "1".into())])?;
+    let hit = page.items.into_iter().next().with_context(|| format!("аніме «{r}» не знайдено"))?;
+    let id = hit.reference().context("у результату немає id")?;
+    Ok((id, Some(hit)))
+}
+
+fn resolve_cli(ctx: &Ctx, input: &str) -> Result<String> {
+    let (r, hit) = resolve(&ctx.client, input)?;
+    if let Some(hit) = hit {
+        eprintln!("{}", dim(&format!("→ {} (#{r})", hit.titles.main())));
+    }
+    Ok(r)
 }
 
 fn print_raw(ctx: &Ctx, path: &str, q: &[(&str, String)]) -> Result<()> {
@@ -302,14 +364,16 @@ fn print_raw(ctx: &Ctx, path: &str, q: &[(&str, String)]) -> Result<()> {
     Ok(())
 }
 
-// ---------- catalogue ----------
+pub fn search_query(text: &str, limit: u32, page: u32) -> api::Query {
+    let mut q: api::Query = vec![("limit", limit.to_string()), ("page", page.to_string())];
+    if !text.is_empty() {
+        q.push(("search", text.to_string()));
+    }
+    q
+}
 
 fn search(ctx: &Ctx, a: SearchArgs) -> Result<()> {
-    let mut q: Vec<(&'static str, String)> = vec![("limit", a.limit.to_string()), ("page", a.page.to_string())];
-    let text = a.query.join(" ");
-    if !text.is_empty() {
-        q.push(("search", text));
-    }
+    let mut q = search_query(&a.query.join(" "), a.limit, a.page);
     for (k, v) in [
         ("genres", a.genres),
         ("statuses", a.status),
@@ -326,137 +390,10 @@ fn search(ctx: &Ctx, a: SearchArgs) -> Result<()> {
         return print_raw(ctx, "anime", &q);
     }
     let page = ctx.client.search(&q)?;
-    if page.items.is_empty() {
-        println!("{}", dim("Нічого не знайдено"));
-        return Ok(());
-    }
-    for a in &page.items {
-        print_short_row(a);
-    }
-    print_page_footer(page.page, page.pages, page.total);
+    let mut lines = view::anime_rows(&page.items, false);
+    lines.extend(view::page_footer(page.page, page.pages, page.total));
+    view::print(&lines);
     Ok(())
-}
-
-fn print_short_row(a: &AnimeShort) {
-    let id = a.ids.mikai.map(|i| i.to_string()).unwrap_or_default();
-    let meta = [
-        a.format.as_deref().map(str::to_uppercase),
-        a.year.map(|y| y.to_string()),
-        short_episodes(&a.episodes).filter(|&e| e > 0).map(|e| format!("{e} еп.")),
-        a.status.as_deref().map(|s| anime_status_label(s).to_string()),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join(" · ");
-    println!(
-        "{}  {}  {}",
-        cyan(&format!("{id:>6}")),
-        bold(a.titles.main()),
-        dim(&meta)
-    );
-}
-
-fn print_page_footer(page: Option<u64>, pages: Option<u64>, total: Option<u64>) {
-    if let (Some(p), Some(ps)) = (page, pages) {
-        if ps > 1 {
-            println!("{}", dim(&format!("сторінка {p}/{ps}, усього {} (--page N)", total.unwrap_or(0))));
-        }
-    }
-}
-
-fn show(ctx: &Ctx, r: &str) -> Result<()> {
-    if ctx.json {
-        return print_raw(ctx, &format!("anime/{r}"), &[]);
-    }
-    let a = ctx.client.anime(r)?;
-    print_detail(&a);
-    Ok(())
-}
-
-fn print_detail(a: &AnimeDetail) {
-    println!("{}", bold(a.titles.main()));
-    if let Some(s) = a.titles.secondary() {
-        println!("{}", dim(s));
-    }
-    let eps = &a.episodes;
-    let eps_str = match (eps.total, eps.aired, eps.localized) {
-        (Some(t), Some(ai), Some(l)) => {
-            let t = if t == 0 { "?".into() } else { t.to_string() };
-            format!("{l} укр. / {ai} вийшло / {t} еп.")
-        }
-        _ => String::new(),
-    };
-    let meta = [
-        a.format.as_deref().map(str::to_uppercase),
-        a.year.map(|y| format!("{} {y}", a.season.as_deref().map(season_label).unwrap_or(""))),
-        a.status.as_deref().map(|s| anime_status_label(s).to_string()),
-        a.studio.clone(),
-        a.age_rating.as_deref().map(str::to_uppercase),
-        Some(eps_str).filter(|s| !s.is_empty()),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|s| s.trim().to_string())
-    .collect::<Vec<_>>()
-    .join(" · ");
-    println!("{meta}");
-    let sc = &a.scores;
-    let mut scores = vec![];
-    if let Some(s) = sc.mikai {
-        scores.push(format!("Mikai {}", yellow(&format!("{s:.1}"))));
-    }
-    if let Some(s) = sc.mal {
-        scores.push(format!("MAL {}", yellow(&format!("{s:.2}"))));
-    }
-    if let Some(s) = sc.hikka {
-        scores.push(format!("Hikka {}", yellow(&format!("{s:.2}"))));
-    }
-    if !scores.is_empty() {
-        println!("{}", scores.join("  "));
-    }
-    if !a.genres.is_empty() {
-        println!("{}", magenta(&a.genres.iter().map(NamedUa::label).collect::<Vec<_>>().join(", ")));
-    }
-    if let Some(d) = &a.description {
-        println!("\n{}", d.trim());
-    }
-    if a.licensed {
-        println!("\n{}", yellow("Ліцензовано в Україні — дивіться легально:"));
-        if let Some(l) = &a.license {
-            println!("{}", serde_json::to_string_pretty(l).unwrap_or_default());
-        }
-    } else if !a.releases.is_empty() {
-        println!("\n{}", bold("Релізи"));
-        print_releases(&a.releases);
-    }
-    if let Some(url) = a.url() {
-        println!("\n{}", dim(&url));
-    }
-}
-
-fn season_label(s: &str) -> &str {
-    match s {
-        "winter" => "зима",
-        "spring" => "весна",
-        "summer" => "літо",
-        "autumn" => "осінь",
-        _ => "",
-    }
-}
-
-fn print_releases(releases: &[Release]) {
-    for r in releases {
-        let eps = r.last_episode.map(fmt_num).unwrap_or_else(|| "–".into());
-        let upd = r.updated_at.as_deref().and_then(parse_time).map(fmt_date).unwrap_or_default();
-        println!(
-            "  {} {}  {}  {}",
-            pad(&r.team_names(), 28),
-            pad(r.kind_label(), 10),
-            green(&pad(&format!("до {eps} еп."), 12)),
-            dim(&format!("{upd}  {}", r.id))
-        );
-    }
 }
 
 fn episodes(ctx: &Ctx, r: &str, team: Option<String>, kind: Option<String>) -> Result<()> {
@@ -469,9 +406,9 @@ fn episodes(ctx: &Ctx, r: &str, team: Option<String>, kind: Option<String>) -> R
         println!("{}", yellow("Ліцензовано в Україні, джерел немає."));
         return Ok(());
     }
-    let releases: Vec<&Release> = p
+    let releases: Vec<Release> = p
         .releases
-        .iter()
+        .into_iter()
         .filter(|rel| kind.as_deref().is_none_or(|k| rel.kind == k))
         .filter(|rel| team.as_deref().is_none_or(|t| rel.matches(t)))
         .collect();
@@ -479,16 +416,13 @@ fn episodes(ctx: &Ctx, r: &str, team: Option<String>, kind: Option<String>) -> R
         bail!("немає релізів за цим фільтром");
     }
     if team.is_none() {
-        print_releases(&releases.into_iter().cloned().collect::<Vec<_>>());
+        view::print(&view::releases(&releases, false));
         println!("{}", dim("Серії релізу: mikai episodes <аніме> --team <команда>"));
         return Ok(());
     }
-    for rel in releases {
-        println!("\n{} {}", bold(&rel.team_names()), dim(&format!("({}, {})", rel.kind_label(), rel.id)));
-        for ep in &rel.episodes {
-            let providers = ep.sources.iter().map(|s| s.provider.as_str()).collect::<Vec<_>>().join(", ");
-            println!("  {}  {}", green(&pad(&format!("{} еп.", ep.label()), 9)), dim(&providers));
-        }
+    for rel in &releases {
+        println!();
+        view::print(&view::episodes(rel, 0.0, None));
     }
     Ok(())
 }
@@ -503,10 +437,7 @@ fn open_episode(
     print: bool,
 ) -> Result<()> {
     let url = match episode {
-        None => {
-            let a = ctx.client.anime(r)?;
-            a.url().context("у аніме немає сторінки")?
-        }
+        None => ctx.client.anime(r)?.url().context("у аніме немає сторінки")?,
         Some(n) => {
             let p = ctx.client.player(r)?;
             if p.licensed {
@@ -551,78 +482,6 @@ pub fn pick_source<'a>(
         })
 }
 
-const WEEKDAYS: [(&str, &str); 7] = [
-    ("monday", "Понеділок"),
-    ("tuesday", "Вівторок"),
-    ("wednesday", "Середа"),
-    ("thursday", "Четвер"),
-    ("friday", "Пʼятниця"),
-    ("saturday", "Субота"),
-    ("sunday", "Неділя"),
-];
-
-pub fn weekday_label(key: &str) -> &str {
-    WEEKDAYS.iter().find(|(k, _)| *k == key).map(|(_, l)| *l).unwrap_or(key)
-}
-
-pub fn weekday_order(key: &str) -> usize {
-    WEEKDAYS.iter().position(|(k, _)| *k == key).unwrap_or(7)
-}
-
-fn schedule(ctx: &Ctx, day: Option<String>) -> Result<()> {
-    if ctx.json {
-        return print_raw(ctx, "schedule", &[]);
-    }
-    let day = day.map(|d| {
-        let d = d.to_lowercase();
-        if d == "today" || d == "сьогодні" {
-            Local::now().format("%A").to_string().to_lowercase()
-        } else {
-            WEEKDAYS.iter().find(|(k, _)| k.starts_with(&d)).map(|(k, _)| k.to_string()).unwrap_or(d)
-        }
-    });
-    let sched = ctx.client.schedule()?;
-    let mut days: Vec<_> = sched.into_iter().collect();
-    days.sort_by_key(|(k, _)| weekday_order(k));
-    for (key, mut items) in days {
-        if day.as_deref().is_some_and(|d| d != key) {
-            continue;
-        }
-        items.sort_by_key(|i| i.airing);
-        println!("{}", bold(weekday_label(&key)));
-        for it in items {
-            let time = it.airing.map(|t| t.with_timezone(&Local).format("%H:%M").to_string()).unwrap_or_else(|| "--:--".into());
-            let ep = it.episode.map(|e| format!("{} еп.", fmt_num(e))).unwrap_or_default();
-            println!(
-                "  {}  {}  {}",
-                cyan(&time),
-                green(&pad(&ep, 8)),
-                it.anime.titles.main()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn updates(ctx: &Ctx, limit: u32, page: u32) -> Result<()> {
-    if ctx.json {
-        return print_raw(ctx, "updates", &[("limit", limit.to_string()), ("page", page.to_string())]);
-    }
-    let p = ctx.client.updates(page, limit)?;
-    for u in &p.items {
-        let when = u.published_at.map(fmt_date).unwrap_or_default();
-        let team = u.team_name.clone().unwrap_or_else(|| u.teams.iter().map(|t| t.name.clone()).collect::<Vec<_>>().join(" × "));
-        println!(
-            "{}  {}  {}  {}",
-            dim(&pad(&when, 11)),
-            green(&pad(&u.episode.map(|e| format!("{} еп.", fmt_num(e))).unwrap_or_default(), 8)),
-            bold(&pad(u.anime.titles.main(), 44)),
-            dim(&format!("{team} · {} · {}", kind_label(&u.kind), u.provider.as_deref().unwrap_or("")))
-        );
-    }
-    Ok(())
-}
-
 // ---------- account ----------
 
 fn require_key(ctx: &Ctx) -> Result<()> {
@@ -632,59 +491,71 @@ fn require_key(ctx: &Ctx) -> Result<()> {
     Ok(())
 }
 
-fn login(ctx: &mut Ctx, with_key: Option<String>, level: &str, client_id: Option<String>, no_browser: bool) -> Result<()> {
-    if let Some(key) = with_key {
-        ctx.client.set_key(Some(key.clone()));
-        let me = ctx.client.me().context("ключ не підійшов")?;
-        if !me.authenticated {
-            bail!("ключ не підійшов");
-        }
-        ctx.config.key = Some(key);
-        ctx.config.level = me.level.clone();
-        ctx.config.user = me.user.as_ref().map(User::label);
-        ctx.config.save()?;
-        println!(
-            "Увійшли як {} (рівень {})",
-            bold(ctx.config.user.as_deref().unwrap_or("?")),
-            me.level.as_deref().unwrap_or("?")
-        );
-        return Ok(());
+pub const NO_CLIENT_ID: &str = "немає clientId застосунку.\n\
+     Увійдіть готовим ключем: створіть його на https://mikai.me/user/developers і виконайте\n  \
+     mikai login --with-key mk_…\n\
+     або передайте clientId: mikai login --client-id mkc_…";
+
+/// Checks `key` and stores it. Returns the user label.
+pub fn save_key(client: &mut Client, config: &mut Config, key: String) -> Result<(String, Option<String>)> {
+    client.set_key(Some(key.clone()));
+    let me = client.me().context("ключ не підійшов")?;
+    if !me.authenticated {
+        client.set_key(None);
+        bail!("ключ не підійшов");
     }
+    config.key = Some(key);
+    config.level = me.level.clone();
+    config.user = me.user.as_ref().map(User::label);
+    config.save()?;
+    Ok((config.user.clone().unwrap_or_else(|| "?".into()), me.level))
+}
 
-    let client_id = client_id.or_else(|| ctx.config.client_id()).context(
-        "немає clientId застосунку.\n\
-         Увійдіть готовим ключем: створіть його на https://mikai.me/user/developers і виконайте\n  \
-         mikai login --with-key mk_…\n\
-         або передайте clientId: mikai login --client-id mkc_…",
-    )?;
-
-    let start = ctx.client.device_start(&client_id, level)?;
-    println!("Підтвердіть вхід у браузері:\n\n  {}\n", bold(&start.verification_url));
-    if !no_browser {
+/// Device login: shows the link through `show`, polls until confirmed.
+pub fn device_login(
+    client: &Client,
+    client_id: &str,
+    level: &str,
+    open_browser: bool,
+    show: impl FnOnce(&str),
+) -> Result<DeviceToken> {
+    let start = client.device_start(client_id, level)?;
+    show(&start.verification_url);
+    if open_browser {
         let _ = open::that_detached(&start.verification_url);
     }
-    eprintln!("{}", dim("Чекаю на підтвердження… (Ctrl+C — скасувати)"));
-
     let deadline = Instant::now() + Duration::from_secs(start.expires_in.max(60));
     let mut interval = start.interval.max(1);
-    let token = loop {
+    loop {
         if Instant::now() > deadline {
             bail!("посилання протухло, спробуйте ще раз");
         }
         thread::sleep(Duration::from_secs(interval));
-        match ctx.client.device_token(&client_id, &start.device_code) {
-            Ok(t) => break t,
+        match client.device_token(client_id, &start.device_code) {
+            Ok(t) => return Ok(t),
             Err(e) if api::is_code(&e, "authorization_pending") => {}
             Err(e) if api::is_code(&e, "slow_down") => interval += 5,
             Err(e) if api::is_code(&e, "access_denied") => bail!("вхід відхилено"),
             Err(e) if api::is_code(&e, "expired_token") => bail!("посилання протухло, спробуйте ще раз"),
             Err(e) => {
-                let _ = ctx.client.device_cancel(&client_id, &start.device_code);
+                let _ = client.device_cancel(client_id, &start.device_code);
                 return Err(e);
             }
         }
-    };
+    }
+}
 
+fn login(ctx: &mut Ctx, with_key: Option<String>, level: &str, client_id: Option<String>, no_browser: bool) -> Result<()> {
+    if let Some(key) = with_key {
+        let (user, level) = save_key(&mut ctx.client, &mut ctx.config, key)?;
+        println!("{} Увійшли як {} (рівень {})", green("✓"), bold(&user), level.as_deref().unwrap_or("?"));
+        return Ok(());
+    }
+    let client_id = client_id.or_else(|| ctx.config.client_id()).context(NO_CLIENT_ID)?;
+    let token = device_login(&ctx.client, &client_id, level, !no_browser, |url| {
+        println!("Підтвердіть вхід у браузері:\n\n  {}\n", bold(url));
+        eprintln!("{}", dim("Чекаю на підтвердження… (Ctrl+C — скасувати)"));
+    })?;
     ctx.config.key = Some(token.key);
     ctx.config.level = token.level.clone();
     ctx.config.user = token.user.as_ref().map(User::label);
@@ -720,27 +591,42 @@ fn logout(ctx: &mut Ctx, local: bool) -> Result<()> {
     Ok(())
 }
 
-fn whoami(ctx: &Ctx) -> Result<()> {
-    if ctx.json {
-        return print_raw(ctx, "me", &[]);
+/// Builds a `PUT /me/list` body. `score == 0` clears the score.
+pub fn entry_patch(status: Option<String>, episodes: Option<i64>, score: Option<f64>, note: Option<String>) -> Value {
+    let mut patch = Map::new();
+    if let Some(s) = status {
+        patch.insert("status".into(), json!(s));
     }
-    let me = ctx.client.me()?;
-    if me.authenticated {
-        let user = me.user.as_ref().map(User::label).unwrap_or_else(|| "ключ без акаунта".into());
-        println!("{} · рівень {}", bold(&user), me.level.as_deref().unwrap_or("?"));
-    } else {
-        println!("Не увійшли (mikai login)");
+    if let Some(e) = episodes {
+        patch.insert("episodes".into(), json!(e));
     }
-    println!(
-        "{}",
-        dim(&format!(
-            "ліміт {}/хв · сьогодні {} запитів · усього {}",
-            me.rate_limit_per_min.unwrap_or(0),
-            me.requests_today.unwrap_or(0),
-            me.requests_total.unwrap_or(0)
-        ))
-    );
-    Ok(())
+    if let Some(s) = score {
+        patch.insert("score".into(), if s == 0.0 { Value::Null } else { json!(s) });
+    }
+    if let Some(n) = note {
+        patch.insert("note".into(), json!(n));
+    }
+    Value::Object(patch)
+}
+
+/// Current entry or `None` when the anime is in no list.
+pub fn entry_of(client: &Client, r: &str) -> Result<Option<ListEntry>> {
+    match client.list_entry(r) {
+        Ok(e) => Ok(Some(e)),
+        Err(e) if api::is_code(&e, "not_in_list") => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// Marks one more episode watched; starts `watching` for new titles.
+pub fn increment(client: &Client, r: &str) -> Result<ListEntry> {
+    let cur = entry_of(client, r)?;
+    let n = cur.as_ref().and_then(|e| e.episodes).unwrap_or(0.0).floor() as i64;
+    let mut patch = json!({ "episodes": n + 1 });
+    if cur.is_none() {
+        patch["status"] = json!("watching");
+    }
+    client.save_entry(r, &patch)
 }
 
 fn list(ctx: &Ctx, a: ListArgs) -> Result<()> {
@@ -755,155 +641,42 @@ fn list(ctx: &Ctx, a: ListArgs) -> Result<()> {
                 return print_raw(ctx, "me/list", &q);
             }
             let p = ctx.client.my_list(a.status.as_deref(), a.page, a.limit)?;
-            if p.items.is_empty() {
-                println!("{}", dim("Порожньо"));
-            }
-            for e in &p.items {
-                print_entry_row(e);
-            }
-            print_page_footer(p.page, p.pages, p.total);
+            let mut lines = view::list_entries(&p.items, false);
+            lines.extend(view::page_footer(p.page, p.pages, p.total));
+            view::print(&lines);
         }
         Some(ListCmd::Get { anime }) => {
-            let r = resolve(ctx, &anime)?;
+            let r = resolve_cli(ctx, &anime)?;
             if ctx.json {
                 return print_raw(ctx, &format!("me/list/{r}"), &[]);
             }
-            match ctx.client.list_entry(&r) {
-                Ok(e) => print_entry_row(&e),
-                Err(e) if api::is_code(&e, "not_in_list") => println!("{}", dim("Немає в списках")),
-                Err(e) => return Err(e),
+            match entry_of(&ctx.client, &r)? {
+                Some(e) => view::print(&[view::list_entry_row(&e, 0, false)]),
+                None => println!("{}", dim("Немає в списках")),
             }
         }
         Some(ListCmd::Set { anime, status, episodes, score, note }) => {
-            let mut patch = Map::new();
-            if let Some(s) = status {
-                patch.insert("status".into(), json!(s));
-            }
-            if let Some(e) = episodes {
-                patch.insert("episodes".into(), json!(e));
-            }
-            if let Some(s) = score {
-                patch.insert("score".into(), if s == 0.0 { Value::Null } else { json!(s) });
-            }
-            if let Some(n) = note {
-                patch.insert("note".into(), json!(n));
-            }
-            if patch.is_empty() {
+            let patch = entry_patch(status, episodes, score, note);
+            if patch.as_object().is_some_and(Map::is_empty) {
                 bail!("нічого змінювати: вкажіть --status, --episodes, --score чи --note");
             }
-            let e = ctx.client.save_entry(&resolve(ctx, &anime)?, &Value::Object(patch))?;
-            print_entry_row(&e);
+            let r = resolve_cli(ctx, &anime)?;
+            let e = ctx.client.save_entry(&r, &patch)?;
+            view::print(&[view::list_entry_row(&e, 0, false)]);
         }
         Some(ListCmd::Inc { anime }) => {
-            let r = resolve(ctx, &anime)?;
-            let cur = match ctx.client.list_entry(&r) {
-                Ok(e) => e.episodes.unwrap_or(0.0).floor() as i64,
-                Err(e) if api::is_code(&e, "not_in_list") => 0,
-                Err(e) => return Err(e),
-            };
-            let mut patch = json!({ "episodes": cur + 1 });
-            if cur == 0 {
-                patch["status"] = json!("watching");
-            }
-            let e = ctx.client.save_entry(&r, &patch)?;
-            print_entry_row(&e);
+            let r = resolve_cli(ctx, &anime)?;
+            let e = increment(&ctx.client, &r)?;
+            view::print(&[view::list_entry_row(&e, 0, false)]);
         }
         Some(ListCmd::Rm { anime }) => {
-            ctx.client.delete_entry(&resolve(ctx, &anime)?)?;
+            ctx.client.delete_entry(&resolve_cli(ctx, &anime)?)?;
             println!("Прибрано.");
         }
         Some(ListCmd::Rewatch { anime, cancel }) => {
-            ctx.client.rewatch(&resolve(ctx, &anime)?, !cancel)?;
+            ctx.client.rewatch(&resolve_cli(ctx, &anime)?, !cancel)?;
             println!("{}", if cancel { "Повтор скасовано." } else { "Повтор почато." });
         }
     }
     Ok(())
-}
-
-fn print_entry_row(e: &ListEntry) {
-    let total = short_episodes(&e.anime.episodes).filter(|&t| t > 0).map(|t| t.to_string()).unwrap_or_else(|| "?".into());
-    let progress = format!("{}/{total}", e.episodes.map(fmt_num).unwrap_or_else(|| "0".into()));
-    let new = e.new_episodes.filter(|&n| n > 0).map(|n| yellow(&format!(" +{n} нових"))).unwrap_or_default();
-    let score = e.score.map(|s| format!(" ★{}", fmt_num(s))).unwrap_or_default();
-    println!(
-        "{}  {}  {}  {}{}{}",
-        cyan(&format!("{:>6}", e.anime.ids.mikai.unwrap_or(0))),
-        pad(list_status_label(&e.status), 11),
-        green(&pad(&progress, 9)),
-        bold(e.anime.titles.main()),
-        yellow(&score),
-        new
-    );
-}
-
-fn history(ctx: &Ctx, limit: u32) -> Result<()> {
-    require_key(ctx)?;
-    if ctx.json {
-        return print_raw(ctx, "me/history", &[("limit", limit.to_string())]);
-    }
-    let p = ctx.client.history(1, limit)?;
-    for item in &p.items {
-        let title = anime_title_of(item);
-        let ep = item.get("episode").and_then(Value::as_f64).map(|e| format!("{} еп.", fmt_num(e))).unwrap_or_default();
-        let when = ["watchedAt", "updatedAt", "createdAt"]
-            .iter()
-            .find_map(|k| item.get(*k).and_then(Value::as_str))
-            .and_then(parse_time)
-            .map(fmt_date)
-            .unwrap_or_default();
-        println!("{}  {}  {}", dim(&pad(&when, 11)), green(&pad(&ep, 8)), bold(&title));
-    }
-    Ok(())
-}
-
-fn notifications(ctx: &Ctx, filter: &str, read_all: bool) -> Result<()> {
-    require_key(ctx)?;
-    if read_all {
-        ctx.client.mark_all_read()?;
-        println!("Усі сповіщення прочитано.");
-        return Ok(());
-    }
-    if ctx.json {
-        return print_raw(ctx, "me/notifications", &[("filter", filter.to_string())]);
-    }
-    let p = ctx.client.notifications(filter, 1, 30)?;
-    if p.items.is_empty() {
-        println!("{}", dim("Сповіщень немає"));
-    }
-    for n in &p.items {
-        let kind = n.get("type").and_then(Value::as_str).unwrap_or("?");
-        let when = n.get("createdAt").and_then(Value::as_str).and_then(parse_time).map(fmt_date).unwrap_or_default();
-        let text = match kind {
-            "newEpisode" => {
-                let ne = n.get("newEpisode").cloned().unwrap_or_default();
-                let eps = ne
-                    .get("episodes")
-                    .and_then(Value::as_array)
-                    .map(|a| a.iter().filter_map(Value::as_f64).map(fmt_num).collect::<Vec<_>>().join(", "))
-                    .unwrap_or_default();
-                format!("{} — нові серії {eps}", anime_title_of(&ne))
-            }
-            "system" => n.pointer("/system/text").and_then(Value::as_str).unwrap_or("").to_string(),
-            other => other.to_string(),
-        };
-        println!("{}  {text}", dim(&pad(&when, 11)));
-    }
-    Ok(())
-}
-
-fn anime_title_of(v: &Value) -> String {
-    v.get("anime")
-        .and_then(|a| serde_json::from_value::<AnimeShort>(a.clone()).ok())
-        .map(|a| a.titles.main().to_string())
-        .unwrap_or_else(|| "?".into())
-}
-
-// ---------- time ----------
-
-pub fn parse_time(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|t| t.with_timezone(&Utc))
-}
-
-pub fn fmt_date(t: DateTime<Utc>) -> String {
-    t.with_timezone(&Local).format("%d.%m %H:%M").to_string()
 }

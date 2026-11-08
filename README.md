@@ -16,8 +16,19 @@ cargo install --git https://github.com/DeityLamb/mikai-cli
 mikai
 ```
 
-Вкладки «Пошук», «Розклад», «Новинки», «Мій список». `Enter` — відкрити, `Esc` — назад, `?` — усі клавіші.
-У серіях `Enter` відкриває плеєр у браузері, `p` перемикає плеєр, `w` позначає переглянутим.
+Інтерфейс у стилі агента: внизу рядок команд, вище — історія всього, що ви робили (зберігається між запусками, гортається PgUp/колесом).
+
+```
+/search frieren        пошук, рядки нумеруються
+/show #1               відкрити аніме — воно стає поточною сесією
+/eps                   релізи по командах;  /eps #2 — серії команди
+/watch 3               відкрити серію в браузері (команда запамʼятовується)
+/next                  наступна серія
+/ep 3 · /status watching · /score 9
+/schedule today · /updates · /list · /login
+```
+
+**Ctrl+P** — меню по центру: дії, живий пошук аніме, вибір команди та серії. `/help` — усе.
 
 ## CLI
 
@@ -30,7 +41,7 @@ mikai open frieren -e 3 -t inari     # відкрити серію в брауз
 mikai schedule -d today              # розклад
 mikai updates                        # новинки
 
-mikai login                          # вхід за посиланням
+mikai login                          # вхід за посиланням (підтвердити на mikai.me)
 mikai login --with-key mk_…          # або готовим ключем з mikai.me/user/developers
 mikai list -s watching               # мої списки
 mikai list set frieren -s watching -e 5 --score 9
