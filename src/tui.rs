@@ -391,7 +391,19 @@ impl App {
         self.next_id
     }
 
-    fn save(&self) {
+    /// Recent titles saved by other running instances, merged into ours.
+    fn sync_recent(&mut self) {
+        let Some(path) = state_path() else { return };
+        let Some(disk) = fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str::<SavedState>(&s).ok()) else { return };
+        for rec in disk.recent {
+            self.remember(rec);
+        }
+    }
+
+    fn save(&mut self) {
+        // Several mikai windows share one state file: never drop what another
+        // one has watched. The rest of the state is per window, last write wins.
+        self.sync_recent();
         let Some(path) = state_path() else { return };
         let skip = self.entries.len().saturating_sub(MAX_ENTRIES);
         let state = json!({
@@ -403,7 +415,11 @@ impl App {
             "session": self.session.as_ref().map(|s| SavedSession { r: s.r.clone(), title: s.title.clone(), team: s.team.clone() }),
         });
         let _ = fs::create_dir_all(path.parent().unwrap());
-        let _ = fs::write(path, state.to_string());
+        // Write to a side file and rename, so a reader never sees half a file.
+        let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+        if fs::write(&tmp, state.to_string()).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
     }
 
     fn note(&mut self, lines: Lines) {
@@ -932,6 +948,7 @@ impl App {
     }
 
     fn open_recent(&mut self) {
+        self.sync_recent();
         self.palette = Some(Palette {
             mode: PMode::Recent,
             query: String::new(),

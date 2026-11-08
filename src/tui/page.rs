@@ -30,6 +30,7 @@ const BUTTONS: [Btn; 5] = [Btn::Mpv, Btn::Browser, Btn::Watched, Btn::Status, Bt
 
 #[derive(Clone)]
 pub(super) enum Hit {
+    Focus(Focus),
     Back,
     Desc,
     Kind(String),
@@ -292,7 +293,11 @@ impl App {
             KeyCode::Char('s') => self.page_action(Btn::Status),
             KeyCode::Char('o') => self.page_action(Btn::Site),
             KeyCode::Char('t') => self.toggle_kind(),
-            KeyCode::Char('p') => self.move_provider(1),
+            KeyCode::Char('1') => self.set_kind("voice"),
+            KeyCode::Char('2') => self.set_kind("sub"),
+            KeyCode::Char('c') => p.focus = Focus::Releases,
+            KeyCode::Char('e') => p.focus = Focus::Episodes,
+            KeyCode::Char('p') => p.focus = Focus::Players,
             KeyCode::Char('i') => p.full_desc = !p.full_desc,
             KeyCode::Enter | KeyCode::Char(' ') => match focus {
                 Focus::Buttons => {
@@ -350,6 +355,7 @@ impl App {
         };
         match hit {
             Hit::Back => self.page = None,
+            Hit::Focus(fo) => set_focus(self, fo),
             Hit::Desc => {
                 if let Some(p) = &mut self.page {
                     p.full_desc = !p.full_desc;
@@ -423,18 +429,25 @@ impl App {
         }
 
         // Track toggle.
+        fill(f, Rect { x: x - 1, y: y - 1, width: w + 2, height: 3 }, PANEL_BG);
         self.draw_kinds(f, x, y, w, &mut hits);
-        y += 2;
+        y += 3;
 
-        // Three pickers: team | episode | player. Buttons and result below.
+        // Three pickers: team | episode | player, each on its own panel.
         let buttons_h = 4;
         let rel_w = 26.min(w / 4);
         let prov_w = 20.min(w / 5);
         let gap = 3;
         let ep_w = w.saturating_sub(rel_w + prov_w + 2 * gap);
         // As tall as the longest list, but within the screen.
-        let avail = bottom.saturating_sub(y + 2 + buttons_h).max(3) as usize;
+        let avail = bottom.saturating_sub(y + 4 + buttons_h).max(3) as usize;
         let list_h = self.picker_rows(ep_w).clamp(3, avail);
+        let focus = self.page.as_ref().map(|p| p.focus).unwrap_or(Focus::Episodes);
+        for (cx, cw, fo) in [(x, rel_w, Focus::Releases), (x + rel_w + gap, ep_w, Focus::Episodes), (x + rel_w + ep_w + 2 * gap, prov_w, Focus::Players)] {
+            let bg = if focus == fo { PANEL_FOCUS } else { PANEL_BG };
+            fill(f, Rect { x: cx - 1, y, width: cw + 2, height: list_h as u16 + 4 }, bg);
+        }
+        y += 1;
         let rel_x = x;
         let ep_x = rel_x + rel_w + gap;
         let prov_x = ep_x + ep_w + gap;
@@ -446,7 +459,7 @@ impl App {
             list_h,
             &mut hits,
         );
-        y += 2 + list_h as u16 + 1;
+        y += 2 + list_h as u16 + 2;
 
         self.draw_buttons(f, x, y, w, &mut hits);
         y += 2;
@@ -461,7 +474,15 @@ impl App {
     }
 
     /// Title, meta and description. Returns the next free row.
-    fn draw_info(&self, f: &mut Frame, x: u16, mut y: u16, w: u16, bottom: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
+    fn draw_info(&self, f: &mut Frame, x: u16, y: u16, w: u16, bottom: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
+        let next = self.draw_info_inner(f, x, y, w, bottom, hits);
+        // Panel behind the info, one row of padding around it.
+        let rect = Rect { x: x - 1, y: y - 1, width: w + 2, height: next - y + 1 };
+        f.buffer_mut().set_style(rect, Style::new().bg(PANEL_BG));
+        next + 2
+    }
+
+    fn draw_info_inner(&self, f: &mut Frame, x: u16, mut y: u16, w: u16, bottom: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
         let (page, session, _) = self.page_parts().unwrap();
         let d = &page.detail;
         let indent = "       ";
@@ -521,33 +542,24 @@ impl App {
         if desc_rows > 0 {
             hits.push((Rect { x, y: y + desc_top as u16, width: w, height: desc_rows as u16 }, Hit::Desc));
         }
-        y + h as u16 + 1
+        y + h as u16
     }
 
     fn draw_kinds(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) {
         let (page, _, Some(pl)) = self.page_parts().unwrap() else { return };
-        let mut spans = vec![Span::styled("Трек   ", Style::new().add_modifier(Modifier::BOLD))];
-        let mut cx = x + 7;
-        for kind in ["voice", "sub"] {
+        let mut spans = vec![Span::styled("Трек    ", Style::new().add_modifier(Modifier::BOLD))];
+        let mut cx = x + 8;
+        for (key, kind) in [("1", "voice"), ("2", "sub")] {
             let n = pl.releases.iter().filter(|r| r.kind == kind).count();
-            let text = format!(" {} {n} ", kind_title(kind));
-            let style = if page.kind == kind {
-                Style::new().bg(SELECTED).add_modifier(Modifier::BOLD)
-            } else if n == 0 {
-                dim()
-            } else {
-                Style::new().fg(Color::Gray)
-            };
-            let tw = text.width() as u16;
+            let chip = chip(key, &format!("{} {n}", kind_title(kind)), page.kind == kind, n == 0);
+            let tw = chip.iter().map(|s| s.content.width()).sum::<usize>() as u16;
             if n > 0 {
                 hits.push((Rect { x: cx, y, width: tw, height: 1 }, Hit::Kind(kind.into())));
             }
-            spans.push(Span::styled(text, style));
+            spans.extend(chip);
             spans.push(Span::raw("  "));
             cx += tw + 2;
         }
-        spans.push(key_span("t"));
-        spans.push(Span::styled(" перемкнути", dim()));
         f.render_widget(Line::from(spans), Rect { x, y, width: w, height: 1 });
     }
 
@@ -576,28 +588,22 @@ impl App {
         let focus = page.focus;
         let list_y = y + 2;
 
-        let header = |label: &str, keys: &[(&'static str, &'static str)], on: bool| {
-            let mut spans = vec![Span::styled(
-                label.to_string(),
-                if on { Style::new().fg(ACCENT).add_modifier(Modifier::BOLD) } else { Style::new().add_modifier(Modifier::BOLD) },
-            )];
-            for (k, d) in keys {
-                spans.push(Span::raw("  "));
-                spans.push(key_span(k));
-                if !d.is_empty() {
-                    spans.push(Span::styled(format!(" {d}"), dim()));
-                }
-            }
-            Line::from(spans)
+        let mut header = |key: &str, label: &str, fo: Focus, x: u16, w: u16| {
+            let spans = chip(key, label, focus == fo, false);
+            let tw = spans.iter().map(|s| s.content.width()).sum::<usize>() as u16;
+            f.render_widget(Line::from(spans), Rect { x, y, width: w, height: 1 });
+            hits.push((Rect { x, y, width: tw.min(w), height: 1 }, Hit::Focus(fo)));
         };
+        header("c", "Команда", Focus::Releases, rel_x, rel_w);
+        header("e", "Серія", Focus::Episodes, ep_x, ep_w);
+        header("p", "Плеєр", Focus::Players, prov_x, prov_w);
         let item_style = |sel: bool, on: bool| match (sel, on) {
             (true, true) => Style::new().bg(SELECTED).add_modifier(Modifier::BOLD),
-            (true, false) => Style::new().bg(Color::Rgb(40, 38, 48)),
+            (true, false) => Style::new().bg(Color::Rgb(56, 48, 64)),
             _ => Style::new(),
         };
 
         // Teams of the shown track.
-        f.render_widget(header("Команда", &[("↑↓", "")], focus == Focus::Releases), Rect { x: rel_x, y, width: rel_w, height: 1 });
         let shown = self.shown_releases();
         let pos = shown.iter().position(|&i| i == page.rel).unwrap_or(0);
         let rel_scroll = follow(page.rel_scroll, pos, list_h);
@@ -624,10 +630,6 @@ impl App {
         }
 
         // Episode grid.
-        f.render_widget(
-            header("Серія", &[("←→↑↓", ""), ("⏎", "дивитись")], focus == Focus::Episodes),
-            Rect { x: ep_x, y, width: ep_w, height: 1 },
-        );
         let mut cols = 1;
         let mut ep_scroll = 0;
         if let Some(rel) = pl.releases.get(page.rel) {
@@ -668,7 +670,6 @@ impl App {
         }
 
         // Players of the selected episode.
-        f.render_widget(header("Плеєр", &[("p", "")], focus == Focus::Players), Rect { x: prov_x, y, width: prov_w, height: 1 });
         let cur = self.current_source().map(|s| s.provider.clone());
         if let Some((_, ep)) = self.current() {
             for (row, s) in ep.sources.iter().enumerate().take(list_h) {
@@ -713,26 +714,9 @@ impl App {
             };
             let disabled = *b == Btn::Mpv && !mpv_ok;
             let focused = page.focus == Focus::Buttons && page.btn == i;
-            let bg = if focused {
-                ACCENT
-            } else if primary {
-                SELECTED
-            } else {
-                Color::Rgb(40, 38, 48)
-            };
-            let fg = if focused {
-                Color::Black
-            } else if disabled {
-                Color::DarkGray
-            } else {
-                Color::Reset
-            };
-            let key_style = if focused { Style::new().bg(bg).fg(Color::Black).add_modifier(Modifier::BOLD) } else { Style::new().bg(bg).fg(ACCENT).add_modifier(Modifier::BOLD) };
-            let text_style = Style::new().bg(bg).fg(fg).add_modifier(if primary || focused { Modifier::BOLD } else { Modifier::empty() });
-            let spans = vec![
-                Span::styled(format!(" {key} "), key_style),
-                Span::styled(format!("{label} "), text_style),
-            ];
+            // Highlighted: the focused button, or the primary one when buttons are not focused.
+            let active = focused || (primary && page.focus != Focus::Buttons);
+            let spans = chip(key, &label, active, disabled);
             let tw = spans.iter().map(|s| s.content.width()).sum::<usize>() as u16;
             let rect = Rect { x: bx, y, width: tw, height: 1 };
             f.render_widget(Line::from(spans), rect);
@@ -755,6 +739,30 @@ impl App {
         }
         f.render_widget(Paragraph::new(out), Rect { x, y, width: w, height: 1 });
     }
+}
+
+const PANEL_BG: Color = Color::Rgb(26, 25, 32);
+const PANEL_FOCUS: Color = Color::Rgb(36, 32, 44);
+const CHIP_BG: Color = Color::Rgb(44, 41, 53);
+
+fn fill(f: &mut Frame, rect: Rect, bg: Color) {
+    let area = f.area();
+    f.buffer_mut().set_style(rect.intersection(area), Style::new().bg(bg));
+}
+
+/// A key-labelled chip like ` 1  Озвучення 8 `: the key on its own tint.
+fn chip(key: &str, label: &str, active: bool, disabled: bool) -> Vec<Span<'static>> {
+    let (key_bg, bg) = if active { (ACCENT, SELECTED) } else { (CHIP_BG, CHIP_BG) };
+    let key_fg = if active { Color::Black } else { ACCENT };
+    let fg = if disabled { Color::DarkGray } else { Color::Reset };
+    let mut text = Style::new().bg(bg).fg(fg);
+    if active {
+        text = text.add_modifier(Modifier::BOLD);
+    }
+    vec![
+        Span::styled(format!(" {key} "), Style::new().bg(key_bg).fg(key_fg).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {label} "), text),
+    ]
 }
 
 fn dim() -> Style {
