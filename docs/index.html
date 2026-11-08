@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>mikai-cli</title>
+<meta name="description" content="Неофіційний консольний клієнт для Mikai — каталогу аніме з українськими озвученнями.">
+<style>
+  :root { color-scheme: light dark; }
+  body { font: 16px/1.6 system-ui, sans-serif; max-width: 640px; margin: 12vh auto; padding: 0 20px; }
+  h1 { font-family: ui-monospace, monospace; margin-bottom: .2em; }
+  .muted { opacity: .65; }
+  pre { background: #8881; padding: 12px 14px; border-radius: 8px; overflow-x: auto; }
+  a { color: #e0457b; }
+</style>
+</head>
+<body>
+  <h1>mikai-cli</h1>
+  <p class="muted">У розробці</p>
+  <p>Неофіційний консольний клієнт для <a href="https://mikai.me">Mikai</a> — каталогу аніме з українськими озвученнями та субтитрами. Пошук, розклад, новинки та ваші списки просто з терміналу.</p>
+<pre>mikai login
+mikai search "frieren"
+mikai list set mal:52991 --status watching --ep 5</pre>
+  <p>Код: <a href="https://github.com/DeityLamb/mikai-cli">github.com/DeityLamb/mikai-cli</a></p>
+  <p class="muted"><small>Проєкт не повʼязаний з командою Mikai. Працює через <a href="https://api.mikai.me/public/docs">публічний API</a>.</small></p>
+</body>
+</html>
