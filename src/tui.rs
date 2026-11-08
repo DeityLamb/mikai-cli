@@ -25,7 +25,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -42,6 +42,9 @@ use crate::{
 const ACCENT: Color = Color::Rgb(224, 69, 123);
 const PANEL: Color = Color::Rgb(32, 30, 38);
 const SELECTED: Color = Color::Rgb(70, 36, 54);
+/// Alternating backgrounds of transcript blocks, and of the focused one.
+const BLOCK_BG: [Color; 2] = [Color::Rgb(24, 23, 30), Color::Rgb(33, 31, 41)];
+const FOCUS_BG: Color = Color::Rgb(52, 33, 48);
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const MAX_ENTRIES: usize = 300;
 const MAX_INPUTS: usize = 500;
@@ -101,6 +104,9 @@ fn help_lines() -> Lines {
         ("Tab", "доповнити команду"),
         ("↑ ↓", "попередні команди"),
         ("PgUp PgDn, колесо", "гортати історію (Esc — донизу)"),
+        ("Ctrl+↑ Ctrl+↓", "вибрати блок; Enter — згорнути/розгорнути"),
+        ("Ctrl+O", "згорнути всі минулі блоки / розгорнути"),
+        ("клік по заголовку", "згорнути/розгорнути блок"),
         ("Ctrl+C", "очистити ввід / вихід"),
     ] {
         out.push(SLine::new().col(k, 18, Tone::Accent).push(d, Tone::Dim));
@@ -148,6 +154,8 @@ struct Entry {
     cmd: String,
     at: DateTime<Utc>,
     lines: Lines,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    collapsed: bool,
     #[serde(skip)]
     pending: bool,
     #[serde(skip)]
@@ -237,6 +245,12 @@ struct App {
     next_id: u64,
     scroll: usize,
     total_lines: usize,
+    /// Block picked with Ctrl+↑/↓, by index in `entries`.
+    focus: Option<usize>,
+    reveal_focus: bool,
+    /// Entry index of every visible transcript row, for mouse clicks.
+    row_owner: Vec<Option<usize>>,
+    transcript_y: u16,
 
     input: String,
     cursor: usize,
@@ -282,6 +296,10 @@ impl App {
             next_id: 1,
             scroll: 0,
             total_lines: 0,
+            focus: None,
+            reveal_focus: false,
+            row_owner: vec![],
+            transcript_y: 0,
             input: String::new(),
             cursor: 0,
             inputs: saved.inputs,
@@ -345,7 +363,7 @@ impl App {
 
     fn note(&mut self, lines: Lines) {
         let id = self.bump();
-        self.entries.push(Entry { cmd: String::new(), at: Utc::now(), lines, pending: false, id, cache: None });
+        self.entries.push(Entry { cmd: String::new(), at: Utc::now(), lines, pending: false, collapsed: false, id, cache: None });
         self.scroll = 0;
     }
 
@@ -358,6 +376,12 @@ impl App {
                     Event::Mouse(m) => match m.kind {
                         MouseEventKind::ScrollUp => self.scroll_by(3),
                         MouseEventKind::ScrollDown => self.scroll_by(-3),
+                        MouseEventKind::Down(event::MouseButton::Left) if self.palette.is_none() => {
+                            let row = m.row.checked_sub(self.transcript_y).map(usize::from);
+                            if let Some(i) = row.and_then(|r| self.row_owner.get(r).copied().flatten()) {
+                                self.toggle(i);
+                            }
+                        }
                         _ => {}
                     },
                     Event::Paste(s) => self.insert(&s.replace(['\n', '\r'], " ")),
@@ -403,7 +427,7 @@ impl App {
         let Some(spec) = find_command(&name.to_lowercase()) else {
             let id = self.bump();
             let lines = vec![err(format!("Невідома команда «{name}».")).push("  /help — список, Ctrl+P — меню", Tone::Dim)];
-            self.entries.push(Entry { cmd: display, at: Utc::now(), lines, pending: false, id, cache: None });
+            self.entries.push(Entry { cmd: display, at: Utc::now(), lines, pending: false, collapsed: false, id, cache: None });
             return;
         };
 
@@ -415,6 +439,7 @@ impl App {
             }
             "clear" => {
                 self.entries.clear();
+                self.focus = None;
                 self.save();
                 return;
             }
@@ -427,11 +452,11 @@ impl App {
         };
         let id = self.bump();
         if let Some(lines) = local {
-            self.entries.push(Entry { cmd: display, at: Utc::now(), lines, pending: false, id, cache: None });
+            self.entries.push(Entry { cmd: display, at: Utc::now(), lines, pending: false, collapsed: false, id, cache: None });
             return;
         }
 
-        self.entries.push(Entry { cmd: display, at: Utc::now(), lines: vec![], pending: true, id, cache: None });
+        self.entries.push(Entry { cmd: display, at: Utc::now(), lines: vec![], pending: true, collapsed: false, id, cache: None });
         let snap = Snap {
             client: self.client.clone(),
             session: self.session.clone(),
@@ -593,6 +618,9 @@ impl App {
             self.palette_key(k);
             return;
         }
+        if self.block_key(k) {
+            return;
+        }
         let comps = self.completions();
         match k.code {
             KeyCode::Char('c') if ctrl => {
@@ -700,6 +728,99 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    // ---------- blocks ----------
+
+    fn is_block(&self, i: usize) -> bool {
+        self.entries.get(i).is_some_and(|e| !e.cmd.is_empty())
+    }
+
+    fn toggle(&mut self, i: usize) {
+        if let Some(e) = self.entries.get_mut(i) {
+            if !e.cmd.is_empty() && !e.pending {
+                e.collapsed = !e.collapsed;
+                self.save();
+            }
+        }
+    }
+
+    fn move_focus(&mut self, up: bool) {
+        let n = self.entries.len();
+        let mut i = match (self.focus, up) {
+            (None, true) => n,
+            (None, false) => return,
+            (Some(i), _) => i,
+        };
+        loop {
+            if up {
+                if i == 0 {
+                    return;
+                }
+                i -= 1;
+            } else {
+                i += 1;
+                if i >= n {
+                    self.focus = None;
+                    self.scroll = 0;
+                    return;
+                }
+            }
+            if self.is_block(i) {
+                self.focus = Some(i);
+                self.reveal_focus = true;
+                return;
+            }
+        }
+    }
+
+    /// Keys for picking and folding blocks. Returns `true` when handled.
+    fn block_key(&mut self, k: KeyEvent) -> bool {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        match k.code {
+            KeyCode::Up if ctrl => self.move_focus(true),
+            KeyCode::Down if ctrl => self.move_focus(false),
+            KeyCode::Char('o') if ctrl => {
+                // Fold every block but the last; if all are folded already, unfold all.
+                let last = self.entries.iter().rposition(|e| !e.cmd.is_empty());
+                let fold = self.entries.iter().enumerate().any(|(i, e)| !e.cmd.is_empty() && !e.collapsed && Some(i) != last);
+                for (i, e) in self.entries.iter_mut().enumerate() {
+                    if !e.cmd.is_empty() && !e.pending {
+                        e.collapsed = fold && Some(i) != last;
+                    }
+                }
+                self.save();
+            }
+            _ => {
+                let Some(i) = self.focus else { return false };
+                match k.code {
+                    KeyCode::Up => self.move_focus(true),
+                    KeyCode::Down => self.move_focus(false),
+                    KeyCode::Enter | KeyCode::Char(' ') => self.toggle(i),
+                    KeyCode::Left => {
+                        if !self.entries[i].collapsed {
+                            self.toggle(i);
+                        }
+                    }
+                    KeyCode::Right => {
+                        if self.entries[i].collapsed {
+                            self.toggle(i);
+                        }
+                    }
+                    KeyCode::Esc => {
+                        self.focus = None;
+                        self.scroll = 0;
+                    }
+                    // Anything else goes back to typing.
+                    _ => {
+                        self.focus = None;
+                        return false;
+                    }
+                }
+                self.reveal_focus = true;
+            }
+        }
+        true
     }
 
     // ---------- palette ----------
@@ -916,13 +1037,12 @@ impl App {
 
     fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
-        let input_h = 1;
-        let bottom_h = 1 + 1 + input_h + 1; // gap, session, input, status
+        let bottom_h = 1 + 1 + 3 + 1; // gap, session, input with rules, status
         let transcript = Rect { height: area.height.saturating_sub(bottom_h), ..area };
         let y = transcript.y + transcript.height;
         let session_area = Rect { y: y + 1, height: 1, ..area };
-        let input_area = Rect { y: y + 2, height: input_h, ..area };
-        let status_area = Rect { y: y + 3, height: 1, ..area };
+        let input_area = Rect { y: y + 2, height: 3, ..area };
+        let status_area = Rect { y: y + 5, height: 1, ..area };
 
         self.draw_transcript(f, transcript);
         self.draw_session(f, session_area);
@@ -939,26 +1059,74 @@ impl App {
     }
 
     fn draw_transcript(&mut self, f: &mut Frame, area: Rect) {
-        let width = area.width.saturating_sub(1).max(10);
+        let width = area.width.saturating_sub(2).max(10);
         let spinner = SPINNER[self.tick % SPINNER.len()];
         let mut all: Vec<Line> = vec![];
-        for e in &mut self.entries {
+        let mut owner: Vec<Option<usize>> = vec![];
+        let mut ranges: Vec<(usize, usize)> = vec![];
+        let mut zebra = 0;
+        let mut shade: Vec<usize> = vec![0; self.entries.len()];
+        for (i, e) in self.entries.iter_mut().enumerate() {
+            let start = all.len();
             if e.cache.as_ref().is_none_or(|(w, _)| *w != width) {
-                e.cache = Some((width, render_entry(e, width)));
+                e.cache = Some((width, render_body(e, width)));
             }
-            all.extend(e.cache.as_ref().unwrap().1.iter().cloned());
-            if e.pending {
-                all.push(Line::from(vec![Span::raw("  "), Span::styled(spinner, Style::new().fg(ACCENT))]));
+            let body = &e.cache.as_ref().unwrap().1;
+            if e.cmd.is_empty() {
+                all.extend(body.iter().cloned());
+                all.push(Line::raw(""));
+                owner.resize(all.len(), None);
+                ranges.push((start, all.len()));
+                continue;
             }
-            all.push(Line::raw(""));
+            shade[i] = zebra;
+            zebra += 1;
+            let focused = self.focus == Some(i);
+            let collapsed = e.collapsed && !e.pending;
+            all.push(header_line(e, width, collapsed, focused));
+            if !collapsed {
+                all.push(Line::raw(""));
+                all.extend(body.iter().cloned());
+                if e.pending {
+                    all.push(Line::from(vec![Span::raw("  "), Span::styled(spinner, Style::new().fg(ACCENT))]));
+                }
+                all.push(Line::raw(""));
+            }
+            owner.resize(all.len(), Some(i));
+            ranges.push((start, all.len()));
         }
-        self.total_lines = all.len().saturating_sub(area.height as usize);
-        self.scroll = self.scroll.min(self.total_lines);
+
         let h = area.height as usize;
+        self.total_lines = all.len().saturating_sub(h);
+        if self.reveal_focus {
+            self.reveal_focus = false;
+            if let Some((start, end)) = self.focus.and_then(|i| ranges.get(i).copied()) {
+                let win_end = all.len() - self.scroll.min(all.len());
+                let win_start = win_end.saturating_sub(h);
+                let new_end = if start < win_start {
+                    start + h
+                } else if end > win_end {
+                    end.min(start + h)
+                } else {
+                    win_end
+                };
+                self.scroll = all.len().saturating_sub(new_end.min(all.len()));
+            }
+        }
+        self.scroll = self.scroll.min(self.total_lines);
         let end = all.len().saturating_sub(self.scroll);
         let start = end.saturating_sub(h);
         let visible: Vec<Line> = all.drain(start..end).collect();
+        self.row_owner = owner[start..end].to_vec();
+        self.transcript_y = area.y;
+
         f.render_widget(Paragraph::new(visible), Rect { x: area.x + 1, width: area.width.saturating_sub(1), ..area });
+        let buf = f.buffer_mut();
+        for (row, o) in self.row_owner.iter().enumerate() {
+            let Some(i) = o else { continue };
+            let bg = if self.focus == Some(*i) { FOCUS_BG } else { BLOCK_BG[shade[*i] % 2] };
+            buf.set_style(Rect { x: area.x, y: area.y + row as u16, width: area.width, height: 1 }, Style::new().bg(bg));
+        }
     }
 
     fn draw_session(&self, f: &mut Frame, area: Rect) {
@@ -992,6 +1160,9 @@ impl App {
     }
 
     fn draw_input(&self, f: &mut Frame, area: Rect) {
+        let rule = if self.focus.is_some() { Color::DarkGray } else { Color::Rgb(90, 70, 85) };
+        f.render_widget(Block::new().borders(Borders::TOP | Borders::BOTTOM).border_style(Style::new().fg(rule)), area);
+        let area = Rect { y: area.y + 1, height: 1, ..area };
         let prompt = Span::styled(" › ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD));
         let avail = area.width.saturating_sub(4) as usize;
         let before: String = self.input.chars().take(self.cursor).collect();
@@ -1013,7 +1184,7 @@ impl App {
             Span::raw(shown)
         };
         f.render_widget(Line::from(vec![prompt, text]), area);
-        if self.palette.is_none() {
+        if self.palette.is_none() && self.focus.is_none() {
             f.set_cursor_position((area.x + 3 + (before_w - skip_w) as u16, area.y));
         }
     }
@@ -1028,7 +1199,11 @@ impl App {
         }
         f.render_widget(Line::from(left), area);
         let user = self.user.clone().unwrap_or_else(|| "не увійшли".into());
-        let right = format!("ctrl+p меню · /help · pgup історія · {user} ");
+        let right = if self.focus.is_some() {
+            "enter згорнути/розгорнути · ctrl+↑↓ блоки · esc назад ".to_string()
+        } else {
+            format!("ctrl+p меню · ctrl+↑ блоки · ctrl+o згорнути · {user} ")
+        };
         f.render_widget(Line::styled(right, Style::new().fg(Color::DarkGray)).right_aligned(), area);
     }
 
@@ -1146,20 +1321,34 @@ fn tone_style(t: Tone) -> Style {
     }
 }
 
-fn render_entry(e: &Entry, width: u16) -> Vec<Line<'static>> {
-    let mut out = vec![];
-    let indent = if e.cmd.is_empty() { "" } else { "  " };
-    if !e.cmd.is_empty() {
-        let time = e.at.with_timezone(&Local).format("%H:%M").to_string();
-        let head_w = e.cmd.width() + 2;
-        let gap = (width as usize).saturating_sub(head_w + time.len() + 1);
-        out.push(Line::from(vec![
-            Span::styled("› ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
-            Span::styled(e.cmd.clone(), Style::new().add_modifier(Modifier::BOLD)),
-            Span::raw(" ".repeat(gap)),
-            Span::styled(time, Style::new().fg(Color::DarkGray)),
-        ]));
+fn header_line(e: &Entry, width: u16, collapsed: bool, focused: bool) -> Line<'static> {
+    let time = e.at.with_timezone(&Local).format("%H:%M").to_string();
+    let arrow = if collapsed { "▸ " } else { "▾ " };
+    let mut spans = vec![
+        Span::styled(arrow, Style::new().fg(if focused { ACCENT } else { Color::DarkGray })),
+        Span::styled("› ", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        Span::styled(e.cmd.clone(), Style::new().add_modifier(Modifier::BOLD)),
+    ];
+    let mut used = 4 + e.cmd.width();
+    let right = time.len() + 2;
+    if collapsed {
+        // A peek at the output: its first non-empty line.
+        let peek = e.lines.iter().map(SLine::text).find(|t| !t.trim().is_empty()).unwrap_or_default();
+        let room = (width as usize).saturating_sub(used + right + 4);
+        if room > 3 && !peek.is_empty() {
+            let peek = crate::style::truncate(peek.trim(), room);
+            used += 3 + peek.width();
+            spans.push(Span::styled(format!("   {peek}"), Style::new().fg(Color::DarkGray)));
+        }
     }
+    spans.push(Span::raw(" ".repeat((width as usize).saturating_sub(used + right))));
+    spans.push(Span::styled(time, Style::new().fg(Color::DarkGray)));
+    Line::from(spans)
+}
+
+fn render_body(e: &Entry, width: u16) -> Vec<Line<'static>> {
+    let indent = if e.cmd.is_empty() { "" } else { "    " };
+    let mut out = vec![];
     for l in &e.lines {
         wrap_line(l, width as usize, indent, &mut out);
     }
