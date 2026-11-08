@@ -129,7 +129,8 @@ pub fn rows(f: &mut Frame, rect: Rect, items: &[Item], sel: usize, bg: Color) ->
         let selected = i == sel;
         let base = Style::new().bg(if selected { SELECT } else { bg });
         let r = Rect { x: rect.x, y: rect.y + row as u16, width: rect.width, height: 1 };
-        let label_w = (rect.width as usize).saturating_sub(key_w + 1 + meta_w + tag_w + 2);
+        // Two columns of air between the label and the meta.
+        let label_w = (rect.width as usize).saturating_sub(key_w + 1 + 2 + meta_w + tag_w + 2);
         let mut spans = vec![];
         if has_keys {
             let k = it.key.clone().unwrap_or_default();
@@ -142,7 +143,7 @@ pub fn rows(f: &mut Frame, rect: Rect, items: &[Item], sel: usize, bg: Color) ->
         } else {
             base
         };
-        spans.push(Span::styled(format!(" {}", pad(&it.label, label_w)), label_style));
+        spans.push(Span::styled(format!(" {}  ", pad(&it.label, label_w)), label_style));
         let meta = truncate(&it.meta, meta_w);
         spans.push(Span::styled(format!("{meta:>meta_w$}  ", meta_w = meta_w), base.fg(MUTED)));
         if tag_w > 0 {

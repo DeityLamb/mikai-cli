@@ -281,6 +281,8 @@ struct App {
 
     palette: Option<Palette>,
     page: Option<page::Page>,
+    /// Pages left by opening a related title; Esc returns to them.
+    page_stack: Vec<page::Page>,
     tick: usize,
     loading: usize,
     quit: bool,
@@ -338,6 +340,7 @@ impl App {
             team_names: Default::default(),
             palette: None,
             page: None,
+            page_stack: vec![],
             tick: 0,
             loading: 0,
             quit: false,
@@ -624,6 +627,17 @@ impl App {
             self.anime_refs = v.iter().filter_map(AnimeShort::reference).collect();
         }
         if let Some((detail, s)) = o.page {
+            // From one title page to another: keep the way back.
+            match self.page.take() {
+                Some(cur) if cur.s.r != s.r => {
+                    self.page_stack.push(cur);
+                    if self.page_stack.len() > 20 {
+                        self.page_stack.remove(0);
+                    }
+                }
+                Some(_) => {}
+                None => self.page_stack.clear(),
+            }
             self.open_page(detail, s);
         }
         if let Some((r, e)) = o.entry {

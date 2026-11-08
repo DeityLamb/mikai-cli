@@ -129,7 +129,39 @@ pub struct AnimeDetail {
     pub licensed: bool,
     pub license: Option<Value>,
     pub releases: Vec<Release>,
+    pub relations: Vec<Relation>,
 }
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Relation {
+    pub kind: String,
+    pub anime: AnimeShort,
+}
+
+impl Relation {
+    /// Order on the page: seasons first, then the rest.
+    pub fn rank(&self) -> usize {
+        RELATION_KINDS.iter().position(|(k, _)| *k == self.kind).unwrap_or(RELATION_KINDS.len())
+    }
+
+    pub fn label(&self) -> &str {
+        RELATION_KINDS.iter().find(|(k, _)| *k == self.kind).map(|(_, l)| *l).unwrap_or("інше")
+    }
+}
+
+const RELATION_KINDS: [(&str, &str); 10] = [
+    ("prequel", "попередній"),
+    ("sequel", "наступний"),
+    ("parent", "основна історія"),
+    ("sideStory", "побічна історія"),
+    ("spinOff", "спін-оф"),
+    ("alternative", "альтернатива"),
+    ("source", "першоджерело"),
+    ("adaptation", "адаптація"),
+    ("character", "спільні персонажі"),
+    ("other", "інше"),
+];
 
 impl AnimeDetail {
     pub fn url(&self) -> Option<String> {

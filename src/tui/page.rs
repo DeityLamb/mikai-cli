@@ -32,6 +32,7 @@ pub(super) enum Modal {
     Kind,
     Team(String),
     Player,
+    Related,
 }
 
 #[derive(Clone)]
@@ -41,6 +42,8 @@ pub(super) enum Hit {
     Open(Modal),
     Episode(usize),
     Button(Btn),
+    /// Open a related title.
+    Related(String),
     /// Row `n` of the open modal.
     Item(usize),
     /// Anywhere on the dimmed page while a modal is open.
@@ -279,6 +282,22 @@ impl App {
         }
     }
 
+    /// Related titles, seasons first.
+    fn relations(&self) -> Vec<&Relation> {
+        let Some(p) = &self.page else { return vec![] };
+        let mut v: Vec<&Relation> = p.detail.relations.iter().filter(|r| r.anime.reference().is_some()).collect();
+        v.sort_by_key(|r| r.rank());
+        v
+    }
+
+    fn related_ref(&self, kinds: &[&str]) -> Option<String> {
+        kinds.iter().find_map(|k| self.relations().into_iter().find(|r| r.kind == *k)).and_then(|r| r.anime.reference())
+    }
+
+    fn open_related(&mut self, r: String) {
+        self.submit(format!("/view {r}"));
+    }
+
     // ---------- modals ----------
 
     fn kinds(&self) -> Vec<String> {
@@ -311,6 +330,7 @@ impl App {
                     .unwrap_or(0);
                 (Modal::Team(k), sel)
             }
+            Modal::Related => (Modal::Related, 0),
             Modal::Player => {
                 let cur = self.current_source().map(|s| s.provider.clone());
                 let sel = self
@@ -363,6 +383,20 @@ impl App {
                     numbered(n, it)
                 })
                 .collect(),
+            Some(Modal::Related) => self
+                .relations()
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let year = r.anime.year.map(|y| y.to_string());
+                    let meta = [Some(r.label().to_string()), r.anime.format.as_deref().map(str::to_uppercase), year]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    numbered(i, ui::Item::new(r.anime.titles.main(), meta))
+                })
+                .collect(),
             Some(Modal::Player) => self
                 .current()
                 .map(|(_, e)| {
@@ -392,6 +426,13 @@ impl App {
                     self.select_release(rel);
                 }
                 self.close_modal();
+            }
+            Modal::Related => {
+                let r = self.relations().get(i).and_then(|r| r.anime.reference());
+                self.close_modal();
+                if let Some(r) = r {
+                    self.open_related(r);
+                }
             }
             Modal::Player => {
                 let name = self.current().and_then(|(_, e)| e.sources.get(i)).map(|s| s.provider.clone());
@@ -454,7 +495,22 @@ impl App {
         let ep_len = self.current().map(|(r, _)| r.episodes.len()).unwrap_or(0);
         let Some(p) = &mut self.page else { return };
         match k.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => self.page = None,
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => self.page = self.page_stack.pop(),
+            KeyCode::Char('[') => {
+                if let Some(r) = self.related_ref(&["prequel", "parent"]) {
+                    self.open_related(r);
+                }
+            }
+            KeyCode::Char(']') => {
+                if let Some(r) = self.related_ref(&["sequel"]) {
+                    self.open_related(r);
+                }
+            }
+            KeyCode::Char('r') => {
+                if !self.relations().is_empty() {
+                    self.open_modal(Modal::Related);
+                }
+            }
             KeyCode::Tab | KeyCode::BackTab => {
                 p.focus = if p.focus == Focus::Episodes { Focus::Buttons } else { Focus::Episodes };
             }
@@ -503,7 +559,8 @@ impl App {
         // Topmost hit wins: modal rows are pushed last.
         let Some(hit) = p.hits.iter().rev().find(|(r, _)| r.contains((col, row).into())).map(|(_, h)| h.clone()) else { return };
         match hit {
-            Hit::Back => self.page = None,
+            Hit::Back => self.page = self.page_stack.pop(),
+            Hit::Related(r) => self.open_related(r),
             Hit::Outside => self.close_modal(),
             Hit::Inside => {}
             Hit::Item(i) => self.modal_pick(i),
@@ -577,6 +634,7 @@ impl App {
             return;
         }
 
+        y = self.draw_related(f, x, y, w, &mut hits);
         y = self.draw_choice(f, x, y, w, &mut hits);
 
         let buttons_h = 4;
@@ -705,6 +763,74 @@ impl App {
             hits.push((Rect { x: inner.x, y: inner.y + h - desc_rows as u16, width: inner.width, height: desc_rows as u16 }, Hit::Desc));
         }
         y + h + 3
+    }
+
+    /// Previous and next season, with a way to all related titles.
+    fn draw_related(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
+        let rels = self.relations();
+        if rels.is_empty() {
+            return y;
+        }
+        let find = |kinds: &[&str]| kinds.iter().find_map(|k| rels.iter().find(|r| r.kind == *k)).copied();
+        let prev = find(&["prequel", "parent"]);
+        let next = find(&["sequel"]);
+        let panel = Rect { x: x - 1, y, width: w + 2, height: 4 };
+        ui::fill(f, panel, SURFACE);
+        let ix = x + 1;
+        let iw = w.saturating_sub(2);
+
+        let mut right = vec![];
+        if prev.is_some() {
+            right.push(ui::key("["));
+            right.push(Span::raw(" "));
+        }
+        if next.is_some() {
+            right.push(ui::key("]"));
+            right.push(Span::raw("   "));
+        }
+        right.extend(ui::hint("r", &format!("усі · {}", rels.len())));
+        let rw = ui::width(&right);
+        hits.push((Rect { x: ix + iw - rw, y: y + 1, width: rw, height: 1 }, Hit::Open(Modal::Related)));
+        ui::section(f, Rect { x: ix, y: y + 1, width: iw, height: 1 }, "Сезони та пов'язані", "", right, false);
+
+        let half = (iw / 2).saturating_sub(2) as usize;
+        let row = y + 2;
+        let item = |r: &Relation, arrow_left: bool| {
+            let title = crate::style::truncate(r.anime.titles.main(), half.saturating_sub(r.label().width() + 6));
+            if arrow_left {
+                vec![Span::styled("← ", Style::new().fg(ACCENT)), Span::styled(title, ui::bold()), Span::styled(format!("  {}", r.label()), ui::muted())]
+            } else {
+                vec![Span::styled(title, ui::bold()), Span::styled(format!("  {}", r.label()), ui::muted()), Span::styled(" →", Style::new().fg(ACCENT))]
+            }
+        };
+        match (prev, next) {
+            (None, None) => {
+                // No seasons: show the closest relations instead.
+                let line = rels.iter().take(2).map(|r| format!("{}  ·  {}", r.anime.titles.main(), r.label())).collect::<Vec<_>>().join("     ");
+                f.render_widget(Line::styled(crate::style::truncate(&line, iw as usize), ui::muted()), Rect { x: ix, y: row, width: iw, height: 1 });
+                hits.push((Rect { x: ix, y: row, width: iw, height: 1 }, Hit::Open(Modal::Related)));
+            }
+            _ => {
+                if let Some(p) = prev {
+                    let spans = item(p, true);
+                    let sw = ui::width(&spans);
+                    f.render_widget(Line::from(spans), Rect { x: ix, y: row, width: sw.min(iw), height: 1 });
+                    if let Some(r) = p.anime.reference() {
+                        hits.push((Rect { x: ix, y: row, width: sw, height: 1 }, Hit::Related(r)));
+                    }
+                }
+                if let Some(n) = next {
+                    let spans = item(n, false);
+                    let sw = ui::width(&spans).min(iw);
+                    let r = Rect { x: ix + iw - sw, y: row, width: sw, height: 1 };
+                    f.render_widget(Line::from(spans), r);
+                    if let Some(id) = n.anime.reference() {
+                        hits.push((r, Hit::Related(id)));
+                    }
+                }
+            }
+        }
+        y + 5
     }
 
     /// Two panels: chosen team and chosen player, each opening its picker.
@@ -878,6 +1004,7 @@ impl App {
             Modal::Kind => ("Трек".to_string(), if two_steps { "крок 1/2" } else { "" }),
             Modal::Team(k) => (format!("Команда · {}", kind_title(k)), if two_steps { "крок 2/2" } else { "" }),
             Modal::Player => (format!("Плеєр · {} еп.", self.current().map(|(_, e)| e.label()).unwrap_or_default()), ""),
+            Modal::Related => ("Сезони та пов'язані".to_string(), ""),
         };
         let mut footer = vec![("↑↓", "вибір"), ("⏎", "обрати")];
         if matches!(m, Modal::Team(_)) && two_steps {
