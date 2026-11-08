@@ -1810,16 +1810,13 @@ fn exec(name: &str, args: &str, snap: &Snap) -> Result<Outcome> {
             let mpv = words.iter().any(|w| *w == "--mpv" || *w == "-m");
             return watch(snap, n, s.team.clone(), None, mpv);
         }
-        "view" => {
-            let r = snap.anime(args)?;
-            return open_anime(snap, &r, None, true);
-        }
-        "resume" => {
-            let r = if args.is_empty() {
+        "view" | "resume" => {
+            let r = if args.is_empty() && name == "resume" {
                 snap.recent.first().map(|x| x.r.clone()).context("ще нічого не дивились")?
             } else {
                 snap.anime(args)?
             };
+            // Both pick up where the title was left: team and next episode.
             let mut out = open_anime(snap, &r, None, true)?;
             if let (Some(s), Some(rec)) = (out.open.as_mut(), snap.recent.iter().find(|x| x.r == r)) {
                 s.last_ep = Some(s.last_ep.unwrap_or(0.0).max(rec.ep));
