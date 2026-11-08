@@ -68,6 +68,7 @@ const COMMANDS: &[Spec] = &[
     Spec { name: "play", aliases: &["p", "mpv"], args: "<серія> [команда] [плеєр]", help: "відкрити серію в mpv" },
     Spec { name: "next", aliases: &["n"], args: "[--mpv]", help: "наступна серія" },
     Spec { name: "view", aliases: &["v"], args: "[аніме|#N]", help: "сторінка перегляду тайтлу" },
+    Spec { name: "resume", aliases: &["continue", "c"], args: "[аніме]", help: "продовжити: сторінка на наступній серії" },
     Spec { name: "ep", aliases: &[], args: "<N>", help: "переглянуто до серії N" },
     Spec { name: "status", aliases: &["st"], args: "<статус>", help: "дивлюсь, заплановано, переглянуто…" },
     Spec { name: "score", aliases: &[], args: "<0.5–10|0>", help: "оцінка (0 — прибрати)" },
@@ -105,6 +106,7 @@ fn help_lines() -> Lines {
     out.push(SLine::of("Клавіші", Tone::Bold));
     for (k, d) in [
         ("Ctrl+P", "меню: дії, пошук аніме, вибір серії"),
+        ("Ctrl+H", "нещодавно переглянуті — продовжити з наступної серії"),
         ("Tab", "доповнити команду"),
         ("↑ ↓", "попередні команди"),
         ("PgUp PgDn, колесо", "гортати історію (Esc — донизу)"),
@@ -169,6 +171,32 @@ struct Entry {
     cache: Option<(u16, Vec<Line<'static>>)>,
 }
 
+/// A title that was watched, for Ctrl+H and `/resume`.
+#[derive(Serialize, Deserialize, Clone)]
+struct Recent {
+    r: String,
+    title: String,
+    ep: f64,
+    /// Release id.
+    team: Option<String>,
+    team_name: Option<String>,
+    at: DateTime<Utc>,
+}
+
+const MAX_RECENT: usize = 100;
+
+fn ago(at: DateTime<Utc>) -> String {
+    let mins = (Utc::now() - at).num_minutes();
+    match mins {
+        ..=0 => "щойно".into(),
+        1..=59 => format!("{mins} хв тому"),
+        60..=1439 => format!("{} год тому", mins / 60),
+        1440..=2879 => "вчора".into(),
+        2880..=43199 => format!("{} дн. тому", mins / 1440),
+        _ => at.with_timezone(&Local).format("%d.%m.%Y").to_string(),
+    }
+}
+
 #[derive(Serialize, Deserialize, Default)]
 struct SavedState {
     entries: Vec<Entry>,
@@ -179,6 +207,8 @@ struct SavedState {
     anime_refs: Vec<String>,
     #[serde(default)]
     release_refs: Vec<String>,
+    #[serde(default)]
+    recent: Vec<Recent>,
 }
 
 fn state_path() -> Option<PathBuf> {
@@ -208,11 +238,13 @@ enum Msg {
     Done(u64, Result<Outcome>),
     Found(u64, Result<Vec<AnimeShort>>),
     Player(String, Result<Player>),
+    History(Result<Vec<serde_json::Value>>),
 }
 
 #[derive(Clone)]
 enum PAction {
     Run(String),
+    Recent,
     Search,
     Releases,
     Episodes(usize),
@@ -227,6 +259,7 @@ struct PItem {
 #[derive(PartialEq)]
 enum PMode {
     Actions,
+    Recent,
     Search,
     Releases,
     Episodes(usize),
@@ -269,6 +302,7 @@ struct App {
     session: Option<Session>,
     anime_refs: Vec<String>,
     release_refs: Vec<String>,
+    recent: Vec<Recent>,
 
     palette: Option<Palette>,
     page: Option<page::Page>,
@@ -317,6 +351,7 @@ impl App {
             session: None,
             anime_refs: saved.anime_refs,
             release_refs: saved.release_refs,
+            recent: saved.recent,
             palette: None,
             page: None,
             tick: 0,
@@ -364,6 +399,7 @@ impl App {
             "inputs": &self.inputs[self.inputs.len().saturating_sub(MAX_INPUTS)..],
             "anime_refs": &self.anime_refs,
             "release_refs": &self.release_refs,
+            "recent": &self.recent,
             "session": self.session.as_ref().map(|s| SavedSession { r: s.r.clone(), title: s.title.clone(), team: s.team.clone() }),
         });
         let _ = fs::create_dir_all(path.parent().unwrap());
@@ -474,6 +510,7 @@ impl App {
             session: self.session.clone(),
             anime_refs: self.anime_refs.clone(),
             release_refs: self.release_refs.clone(),
+            recent: self.recent.clone(),
             tx: self.tx.clone(),
             id,
         };
@@ -517,6 +554,29 @@ impl App {
                     if p.generation == generation {
                         p.results = res.unwrap_or_default();
                         p.sel = 0;
+                    }
+                }
+            }
+            Msg::History(res) => {
+                self.loading = self.loading.saturating_sub(1);
+                if let Ok(items) = res {
+                    for it in items {
+                        let anime = view::anime_of(&it);
+                        let Some(r) = anime.reference() else { continue };
+                        let at = ["watchedAt", "updatedAt", "createdAt"]
+                            .iter()
+                            .find_map(|k| it.get(*k).and_then(|v| v.as_str()))
+                            .and_then(view::parse_time)
+                            .unwrap_or_else(Utc::now);
+                        let rec = Recent {
+                            r,
+                            title: anime.titles.main().to_string(),
+                            ep: it.get("episode").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                            team: it.get("releaseId").and_then(|v| v.as_str()).map(str::to_string),
+                            team_name: None,
+                            at,
+                        };
+                        self.remember(rec);
                     }
                 }
             }
@@ -565,6 +625,11 @@ impl App {
             if let Some((r, n)) = o.last_ep {
                 if s.r == r {
                     s.last_ep = Some(n);
+                    let team_name = s.team.as_ref().and_then(|t| {
+                        s.player.as_ref().and_then(|p| p.releases.iter().find(|x| &x.id == t)).map(|x| x.team_names())
+                    });
+                    let rec = Recent { r, title: s.title.clone(), ep: n, team: s.team.clone(), team_name, at: Utc::now() };
+                    self.remember(rec);
                 }
             }
         }
@@ -627,6 +692,14 @@ impl App {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && k.code == KeyCode::Char('p') {
             self.toggle_palette();
+            return;
+        }
+        if ctrl && k.code == KeyCode::Char('h') {
+            if matches!(self.palette.as_ref().map(|p| &p.mode), Some(PMode::Recent)) {
+                self.palette = None;
+            } else {
+                self.open_recent();
+            }
             return;
         }
         if self.palette.is_some() {
@@ -842,6 +915,37 @@ impl App {
         true
     }
 
+    /// Adds or refreshes a recent title; newer records win.
+    fn remember(&mut self, rec: Recent) {
+        if let Some(old) = self.recent.iter().find(|x| x.r == rec.r) {
+            if old.at > rec.at {
+                return;
+            }
+        }
+        let team_name = rec.team_name.clone().or_else(|| {
+            self.recent.iter().find(|x| x.r == rec.r && x.team == rec.team).and_then(|x| x.team_name.clone())
+        });
+        self.recent.retain(|x| x.r != rec.r);
+        self.recent.push(Recent { team_name, ..rec });
+        self.recent.sort_by(|a, b| b.at.cmp(&a.at));
+        self.recent.truncate(MAX_RECENT);
+    }
+
+    fn open_recent(&mut self) {
+        self.palette = Some(Palette {
+            mode: PMode::Recent,
+            query: String::new(),
+            sel: 0,
+            results: vec![],
+            searched: String::new(),
+            typed_at: Instant::now(),
+            generation: 0,
+        });
+        if self.client.has_key() {
+            self.spawn_raw(|c| Msg::History(c.history(1, 50).map(|p| p.items)));
+        }
+    }
+
     // ---------- palette ----------
 
     fn toggle_palette(&mut self) {
@@ -862,8 +966,24 @@ impl App {
         let Some(p) = &self.palette else { return vec![] };
         let run = |label: &str, hint: &str, cmd: &str| PItem { label: label.into(), hint: hint.into(), action: PAction::Run(cmd.into()) };
         let items: Vec<PItem> = match &p.mode {
+            PMode::Recent => self
+                .recent
+                .iter()
+                .map(|x| {
+                    let team = x.team_name.clone().or_else(|| x.team.clone()).unwrap_or_default();
+                    let hint = [Some(format!("{} еп.", fmt_num(x.ep))), (!team.is_empty()).then_some(team), Some(ago(x.at))]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(" · ");
+                    PItem { label: x.title.clone(), hint, action: PAction::Run(format!("/resume {}", x.r)) }
+                })
+                .collect(),
             PMode::Actions => {
-                let mut v = vec![PItem { label: "Пошук аніме…".into(), hint: "/search".into(), action: PAction::Search }];
+                let mut v = vec![
+                    PItem { label: "Пошук аніме…".into(), hint: "/search".into(), action: PAction::Search },
+                    PItem { label: "Продовжити перегляд…".into(), hint: "Ctrl+H".into(), action: PAction::Recent },
+                ];
                 if let Some(s) = &self.session {
                     v.push(PItem { label: format!("Серії «{}»…", s.title), hint: "/watch".into(), action: PAction::Releases });
                     v.push(run("Сторінка перегляду", "/view", "/view"));
@@ -1001,6 +1121,14 @@ impl App {
                     PAction::Run(cmd) => {
                         self.palette = None;
                         self.submit(cmd);
+                    }
+                    PAction::Recent => {
+                        p.mode = PMode::Recent;
+                        p.query.clear();
+                        p.sel = 0;
+                        if self.client.has_key() {
+                            self.spawn_raw(|c| Msg::History(c.history(1, 50).map(|p| p.items)));
+                        }
                     }
                     PAction::Search => {
                         p.mode = PMode::Search;
@@ -1263,6 +1391,7 @@ impl App {
 
         let title = match &p.mode {
             PMode::Actions => "Меню".to_string(),
+            PMode::Recent => "Нещодавно переглянуті".to_string(),
             PMode::Search => "Пошук аніме".to_string(),
             PMode::Releases => "Оберіть команду".to_string(),
             PMode::Episodes(i) => self
@@ -1296,6 +1425,8 @@ impl App {
         if items.is_empty() {
             let msg = match p.mode {
                 PMode::Search if p.query.is_empty() => "почніть вводити назву",
+                PMode::Recent if self.loading > 0 => "завантаження…",
+                PMode::Recent => "ще нічого не дивились: /watch або /play",
                 PMode::Search if p.query != p.searched || self.loading > 0 => "шукаю…",
                 PMode::Releases if self.session.as_ref().is_some_and(|s| s.player.is_none()) => "завантаження…",
                 _ => "нічого немає",
@@ -1305,7 +1436,7 @@ impl App {
         for (i, it) in items.iter().enumerate().skip(start).take(list_h) {
             let sel = i == p.sel;
             let base = if sel { Style::new().bg(SELECTED) } else { Style::new() };
-            let label_w = inner.width as usize * 2 / 3;
+            let label_w = inner.width as usize * 3 / 5;
             let label = crate::style::pad(&it.label, label_w);
             let hint = crate::style::pad(&it.hint, (inner.width as usize).saturating_sub(label_w));
             lines.push(Line::from(vec![
@@ -1462,6 +1593,7 @@ struct Snap {
     session: Option<Session>,
     anime_refs: Vec<String>,
     release_refs: Vec<String>,
+    recent: Vec<Recent>,
     tx: Sender<Msg>,
     id: u64,
 }
@@ -1681,6 +1813,26 @@ fn exec(name: &str, args: &str, snap: &Snap) -> Result<Outcome> {
         "view" => {
             let r = snap.anime(args)?;
             return open_anime(snap, &r, None, true);
+        }
+        "resume" => {
+            let r = if args.is_empty() {
+                snap.recent.first().map(|x| x.r.clone()).context("ще нічого не дивились")?
+            } else {
+                snap.anime(args)?
+            };
+            let mut out = open_anime(snap, &r, None, true)?;
+            if let (Some(s), Some(rec)) = (out.open.as_mut(), snap.recent.iter().find(|x| x.r == r)) {
+                s.last_ep = Some(s.last_ep.unwrap_or(0.0).max(rec.ep));
+                if s.team.is_none() {
+                    s.team = rec.team.clone();
+                }
+                out.lines = vec![
+                    SLine::of("Продовжити: ", Tone::Dim)
+                        .push(s.title.clone(), Tone::Bold)
+                        .push(format!("  після {} еп.", fmt_num(rec.ep)), Tone::Dim),
+                ];
+            }
+            return Ok(out);
         }
         "ep" => {
             let n: i64 = args.parse().context("/ep <номер серії>")?;
