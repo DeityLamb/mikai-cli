@@ -428,24 +428,19 @@ impl App {
             return;
         }
 
-        // Track toggle.
-        fill(f, Rect { x: x - 1, y: y - 1, width: w + 2, height: 3 }, PANEL_BG);
-        self.draw_kinds(f, x, y, w, &mut hits);
-        y += 3;
-
         // Three pickers: team | episode | player, each on its own panel.
         let buttons_h = 4;
-        let rel_w = 26.min(w / 4);
+        let rel_w = 30.min(w / 3);
         let prov_w = 20.min(w / 5);
         let gap = 3;
         let ep_w = w.saturating_sub(rel_w + prov_w + 2 * gap);
         // As tall as the longest list, but within the screen.
-        let avail = bottom.saturating_sub(y + 4 + buttons_h).max(3) as usize;
+        let avail = bottom.saturating_sub(y + 6 + buttons_h).max(3) as usize;
         let list_h = self.picker_rows(ep_w).clamp(3, avail);
         let focus = self.page.as_ref().map(|p| p.focus).unwrap_or(Focus::Episodes);
         for (cx, cw, fo) in [(x, rel_w, Focus::Releases), (x + rel_w + gap, ep_w, Focus::Episodes), (x + rel_w + ep_w + 2 * gap, prov_w, Focus::Players)] {
             let bg = if focus == fo { PANEL_FOCUS } else { PANEL_BG };
-            fill(f, Rect { x: cx - 1, y, width: cw + 2, height: list_h as u16 + 4 }, bg);
+            fill(f, Rect { x: cx - 1, y, width: cw + 2, height: list_h as u16 + 6 }, bg);
         }
         y += 1;
         let rel_x = x;
@@ -459,7 +454,7 @@ impl App {
             list_h,
             &mut hits,
         );
-        y += 2 + list_h as u16 + 2;
+        y += 4 + list_h as u16 + 2;
 
         self.draw_buttons(f, x, y, w, &mut hits);
         y += 2;
@@ -545,21 +540,33 @@ impl App {
         y + h as u16
     }
 
+    /// Voice/subs switch at the top of the team column.
     fn draw_kinds(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) {
         let (page, _, Some(pl)) = self.page_parts().unwrap() else { return };
-        let mut spans = vec![Span::styled("Трек    ", Style::new().add_modifier(Modifier::BOLD))];
-        let mut cx = x + 8;
-        for (key, kind) in [("1", "voice"), ("2", "sub")] {
+        let mut spans = vec![];
+        let mut cx = x;
+        for kind in ["voice", "sub"] {
             let n = pl.releases.iter().filter(|r| r.kind == kind).count();
-            let chip = chip(key, &format!("{} {n}", kind_title(kind)), page.kind == kind, n == 0);
-            let tw = chip.iter().map(|s| s.content.width()).sum::<usize>() as u16;
+            let text = format!(" {} {n} ", kind_title(kind));
+            let style = if page.kind == kind {
+                Style::new().bg(SELECTED).add_modifier(Modifier::BOLD)
+            } else if n == 0 {
+                dim()
+            } else {
+                Style::new().fg(Color::Gray)
+            };
+            let tw = text.width() as u16;
             if n > 0 {
                 hits.push((Rect { x: cx, y, width: tw, height: 1 }, Hit::Kind(kind.into())));
             }
-            spans.extend(chip);
-            spans.push(Span::raw("  "));
-            cx += tw + 2;
+            spans.push(Span::styled(text, style));
+            cx += tw;
         }
+        let key = Span::styled(" t ", Style::new().bg(CHIP_BG).fg(ACCENT).add_modifier(Modifier::BOLD));
+        let used = (cx - x) as usize;
+        spans.push(Span::raw(" ".repeat((w as usize).saturating_sub(used + 3))));
+        hits.push((Rect { x: x + w.saturating_sub(3), y, width: 3, height: 1 }, Hit::Kind(if page.kind == "voice" { "sub".into() } else { "voice".into() })));
+        spans.push(key);
         f.render_widget(Line::from(spans), Rect { x, y, width: w, height: 1 });
     }
 
@@ -586,7 +593,9 @@ impl App {
         let (page, session, Some(pl)) = self.page_parts().unwrap() else { return (0, 0, 1) };
         let [(rel_x, rel_w), (ep_x, ep_w), (prov_x, prov_w)] = cols_xw;
         let focus = page.focus;
-        let list_y = y + 2;
+        // The team column has the voice/subs switch under its header; lists line up below it.
+        self.draw_kinds(f, rel_x, y + 2, rel_w, hits);
+        let list_y = y + 4;
 
         let mut header = |key: &str, label: &str, fo: Focus, x: u16, w: u16| {
             let spans = chip(key, label, focus == fo, false);
