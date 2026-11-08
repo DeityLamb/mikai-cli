@@ -42,6 +42,7 @@ use crate::{
     view::{self, Lines, SLine, Seg, Tone, blank, dim, err, plain},
 };
 
+mod keys;
 mod page;
 
 mod ui;
@@ -456,12 +457,20 @@ impl App {
         self.recall = None;
         self.scroll = 0;
 
-        let body = text.strip_prefix('/').unwrap_or(&text);
+        // On a Ukrainian keyboard the `/` key types `.`.
+        let body = text.strip_prefix('/').or_else(|| text.strip_prefix('.')).unwrap_or(&text);
         let (name, args) = body.split_once(char::is_whitespace).unwrap_or((body, ""));
         let args = args.trim().to_string();
-        let display = format!("/{}", body.trim());
+        // A command name typed in the wrong layout still counts: `іуфкср` → `search`.
+        let spec = find_command(&name.to_lowercase()).or_else(|| find_command(&keys::command_word(&name.to_lowercase())));
+        let display = match spec {
+            Some(sp) if sp.name != name.to_lowercase() && !sp.aliases.contains(&name.to_lowercase().as_str()) => {
+                format!("/{} {args}", sp.name).trim_end().to_string()
+            }
+            _ => format!("/{}", body.trim()),
+        };
 
-        let Some(spec) = find_command(&name.to_lowercase()) else {
+        let Some(spec) = spec else {
             let id = self.bump();
             let lines = vec![err(format!("Невідома команда «{name}».")).push("  /help — список, Ctrl+P — меню", Tone::Dim)];
             self.entries.push(Entry { cmd: display, at: Utc::now(), lines, pending: false, collapsed: false, action: false, id, cache: None });
@@ -668,11 +677,11 @@ impl App {
     }
 
     fn completions(&self) -> Vec<&'static Spec> {
-        let Some(typed) = self.input.strip_prefix('/') else { return vec![] };
+        let Some(typed) = self.input.strip_prefix('/').or_else(|| self.input.strip_prefix('.')) else { return vec![] };
         if typed.contains(' ') {
             return vec![];
         }
-        let typed = typed.to_lowercase();
+        let typed = keys::command_word(&typed.to_lowercase());
         COMMANDS
             .iter()
             .filter(|c| c.name.starts_with(&typed) || c.aliases.iter().any(|a| a.starts_with(&typed)))
@@ -685,12 +694,14 @@ impl App {
 
     fn on_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        if ctrl && matches!(k.code, KeyCode::Char('p' | 'P')) {
-            let shift = k.modifiers.contains(KeyModifiers::SHIFT) || k.code == KeyCode::Char('P');
+        // Hotkeys work in any keyboard layout; typed text is left alone.
+        let hk = keys::hotkey(k);
+        if ctrl && matches!(hk.code, KeyCode::Char('p' | 'P')) {
+            let shift = k.modifiers.contains(KeyModifiers::SHIFT) || hk.code == KeyCode::Char('P');
             self.open_palette(if shift { PMode::Actions } else { PMode::Search });
             return;
         }
-        if ctrl && k.code == KeyCode::Char('h') {
+        if ctrl && hk.code == KeyCode::Char('h') {
             if matches!(self.palette.as_ref().map(|p| &p.mode), Some(PMode::Recent)) {
                 self.palette = None;
             } else {
@@ -703,14 +714,14 @@ impl App {
             return;
         }
         if self.page.is_some() {
-            self.page_key(k);
+            self.page_key(hk);
             return;
         }
-        if self.block_key(k) {
+        if self.block_key(hk) {
             return;
         }
         let comps = self.completions();
-        match k.code {
+        match if ctrl { hk.code } else { k.code } {
             KeyCode::Char('c') if ctrl => {
                 if self.input.is_empty() {
                     self.quit = true;
@@ -1064,6 +1075,8 @@ impl App {
     }
 
     fn palette_key(&mut self, k: KeyEvent) {
+        // The query is text; only Ctrl combinations are hotkeys here.
+        let k = if k.modifiers.contains(KeyModifiers::CONTROL) { keys::hotkey(k) } else { k };
         let items_len = self.palette_items().len();
         let Some(p) = &mut self.palette else { return };
         match k.code {
