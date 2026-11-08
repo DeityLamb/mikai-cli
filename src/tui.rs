@@ -1075,8 +1075,8 @@ impl App {
             }
             let body = &e.cache.as_ref().unwrap().1;
             if e.cmd.is_empty() {
-                all.extend(body.iter().cloned());
                 all.push(Line::raw(""));
+                all.extend(body.iter().cloned());
                 owner.resize(all.len(), None);
                 ranges.push((start, all.len()));
                 continue;
@@ -1086,7 +1086,9 @@ impl App {
             let focused = self.focus == Some(i);
             let collapsed = e.collapsed && !e.pending;
             if !collapsed {
-                bare.push(all.len());
+                // One-line margin above the command, then the command itself, both unshaded.
+                bare.extend([all.len(), all.len() + 1]);
+                all.push(Line::raw(""));
             }
             all.push(header_line(e, width, collapsed, focused));
             if !collapsed {
