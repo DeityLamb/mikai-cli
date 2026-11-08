@@ -290,10 +290,6 @@ impl App {
         v
     }
 
-    fn related_ref(&self, kinds: &[&str]) -> Option<String> {
-        kinds.iter().find_map(|k| self.relations().into_iter().find(|r| r.kind == *k)).and_then(|r| r.anime.reference())
-    }
-
     fn open_related(&mut self, r: String) {
         self.submit(format!("/view {r}"));
     }
@@ -496,16 +492,6 @@ impl App {
         let Some(p) = &mut self.page else { return };
         match k.code {
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::Backspace => self.page = self.page_stack.pop(),
-            KeyCode::Char('[') => {
-                if let Some(r) = self.related_ref(&["prequel", "parent"]) {
-                    self.open_related(r);
-                }
-            }
-            KeyCode::Char(']') => {
-                if let Some(r) = self.related_ref(&["sequel"]) {
-                    self.open_related(r);
-                }
-            }
             KeyCode::Char('r') => {
                 if !self.relations().is_empty() {
                     self.open_modal(Modal::Related);
@@ -765,72 +751,50 @@ impl App {
         y + h + 3
     }
 
-    /// Previous and next season, with a way to all related titles.
+    /// The first few related titles as a list; `r` opens all of them.
     fn draw_related(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
+        const SHOWN: usize = 3;
         let rels = self.relations();
         if rels.is_empty() {
             return y;
         }
-        let find = |kinds: &[&str]| kinds.iter().find_map(|k| rels.iter().find(|r| r.kind == *k)).copied();
-        let prev = find(&["prequel", "parent"]);
-        let next = find(&["sequel"]);
-        let panel = Rect { x: x - 1, y, width: w + 2, height: 4 };
+        let rows = rels.len().min(SHOWN) as u16 + u16::from(rels.len() > SHOWN);
+        let panel = Rect { x: x - 1, y, width: w + 2, height: rows + 4 };
         ui::fill(f, panel, SURFACE);
         let ix = x + 1;
         let iw = w.saturating_sub(2);
 
-        let mut right = vec![];
-        if prev.is_some() {
-            right.push(ui::key("["));
-            right.push(Span::raw(" "));
-        }
-        if next.is_some() {
-            right.push(ui::key("]"));
-            right.push(Span::raw("   "));
-        }
-        right.extend(ui::hint("r", &format!("усі · {}", rels.len())));
-        let rw = ui::width(&right);
-        hits.push((Rect { x: ix + iw - rw, y: y + 1, width: rw, height: 1 }, Hit::Open(Modal::Related)));
-        ui::section(f, Rect { x: ix, y: y + 1, width: iw, height: 1 }, "Сезони та пов'язані", "", right, false);
+        let all = ui::hint("r", &format!("усі · {}", rels.len()));
+        let aw = ui::width(&all);
+        hits.push((Rect { x: ix + iw - aw, y: y + 1, width: aw, height: 1 }, Hit::Open(Modal::Related)));
+        ui::section(f, Rect { x: ix, y: y + 1, width: iw, height: 1 }, "Сезони та пов'язані", "", all, false);
 
-        let half = (iw / 2).saturating_sub(2) as usize;
-        let row = y + 2;
-        let item = |r: &Relation, arrow_left: bool| {
-            let title = crate::style::truncate(r.anime.titles.main(), half.saturating_sub(r.label().width() + 6));
-            if arrow_left {
-                vec![Span::styled("← ", Style::new().fg(ACCENT)), Span::styled(title, ui::bold()), Span::styled(format!("  {}", r.label()), ui::muted())]
-            } else {
-                vec![Span::styled(title, ui::bold()), Span::styled(format!("  {}", r.label()), ui::muted()), Span::styled(" →", Style::new().fg(ACCENT))]
-            }
-        };
-        match (prev, next) {
-            (None, None) => {
-                // No seasons: show the closest relations instead.
-                let line = rels.iter().take(2).map(|r| format!("{}  ·  {}", r.anime.titles.main(), r.label())).collect::<Vec<_>>().join("     ");
-                f.render_widget(Line::styled(crate::style::truncate(&line, iw as usize), ui::muted()), Rect { x: ix, y: row, width: iw, height: 1 });
-                hits.push((Rect { x: ix, y: row, width: iw, height: 1 }, Hit::Open(Modal::Related)));
-            }
-            _ => {
-                if let Some(p) = prev {
-                    let spans = item(p, true);
-                    let sw = ui::width(&spans);
-                    f.render_widget(Line::from(spans), Rect { x: ix, y: row, width: sw.min(iw), height: 1 });
-                    if let Some(r) = p.anime.reference() {
-                        hits.push((Rect { x: ix, y: row, width: sw, height: 1 }, Hit::Related(r)));
-                    }
-                }
-                if let Some(n) = next {
-                    let spans = item(n, false);
-                    let sw = ui::width(&spans).min(iw);
-                    let r = Rect { x: ix + iw - sw, y: row, width: sw, height: 1 };
-                    f.render_widget(Line::from(spans), r);
-                    if let Some(id) = n.anime.reference() {
-                        hits.push((r, Hit::Related(id)));
-                    }
-                }
+        for (i, r) in rels.iter().take(SHOWN).enumerate() {
+            let row = Rect { x: ix, y: y + 3 + i as u16, width: iw, height: 1 };
+            let meta = [Some(r.label().to_string()), r.anime.format.as_deref().map(str::to_uppercase), r.anime.year.map(|y| y.to_string())]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let title_w = (iw as usize).saturating_sub(meta.width() + 3);
+            f.render_widget(
+                Line::from(vec![
+                    Span::styled(crate::style::pad(r.anime.titles.main(), title_w), ui::bold()),
+                    Span::raw("   "),
+                    Span::styled(meta, ui::muted()),
+                ]),
+                row,
+            );
+            if let Some(id) = r.anime.reference() {
+                hits.push((row, Hit::Related(id)));
             }
         }
-        y + 5
+        if rels.len() > SHOWN {
+            let row = Rect { x: ix, y: y + 3 + SHOWN as u16, width: iw, height: 1 };
+            f.render_widget(Line::styled(format!("… ще {}", rels.len() - SHOWN), ui::muted()), row);
+            hits.push((row, Hit::Open(Modal::Related)));
+        }
+        y + rows + 5
     }
 
     /// Two panels: chosen team and chosen player, each opening its picker.
