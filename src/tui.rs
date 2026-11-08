@@ -850,7 +850,7 @@ impl App {
     // ---------- blocks ----------
 
     fn is_block(&self, i: usize) -> bool {
-        self.entries.get(i).is_some_and(|e| !e.cmd.is_empty())
+        self.entries.get(i).is_some_and(|e| !e.cmd.is_empty()) && !folded_into_next(&self.entries, i)
     }
 
     fn toggle(&mut self, i: usize) {
@@ -1287,8 +1287,21 @@ impl App {
         let mut ranges: Vec<(usize, usize)> = vec![];
         let mut zebra = 0;
         let mut shade: Vec<usize> = vec![0; self.entries.len()];
+        // Runs of the same command show as one block: the last one, with a count.
+        let folded: Vec<bool> = (0..self.entries.len()).map(|i| folded_into_next(&self.entries, i)).collect();
+        let mut run: Vec<(usize, Option<DateTime<Utc>>)> = vec![(1, None); self.entries.len()];
+        for i in 1..self.entries.len() {
+            if folded[i - 1] {
+                let (n, first) = run[i - 1];
+                run[i] = (n + 1, first.or(Some(self.entries[i - 1].at)));
+            }
+        }
         for (i, e) in self.entries.iter_mut().enumerate() {
             let start = all.len();
+            if folded[i] {
+                ranges.push((start, start));
+                continue;
+            }
             if e.cache.as_ref().is_none_or(|(w, _)| *w != width) {
                 e.cache = Some((width, render_body(e, width)));
             }
@@ -1307,7 +1320,7 @@ impl App {
                 bare.extend([all.len(), all.len() + 1]);
                 all.push(Line::raw(""));
             }
-            all.push(header_line(e, width, collapsed));
+            all.push(header_line(e, width, collapsed, run[i]));
             if !collapsed {
                 all.push(Line::raw(""));
                 all.extend(body.iter().cloned());
@@ -1533,15 +1546,31 @@ fn tone_style(t: Tone) -> Style {
     }
 }
 
-fn header_line(e: &Entry, width: u16, collapsed: bool) -> Line<'static> {
-    let time = e.at.with_timezone(&Local).format("%H:%M").to_string();
+/// Entry `i` is a command repeated right after by the same command.
+fn folded_into_next(entries: &[Entry], i: usize) -> bool {
+    let Some(e) = entries.get(i) else { return false };
+    !e.cmd.is_empty() && entries.get(i + 1).is_some_and(|n| n.cmd == e.cmd)
+}
+
+/// `run`: how many times in a row the command ran, and when the first one did.
+fn header_line(e: &Entry, width: u16, collapsed: bool, run: (usize, Option<DateTime<Utc>>)) -> Line<'static> {
+    let hm = |t: DateTime<Utc>| t.with_timezone(&Local).format("%H:%M").to_string();
+    let time = match run.1.map(hm) {
+        Some(first) if first != hm(e.at) => format!("{first}–{}", hm(e.at)),
+        _ => hm(e.at),
+    };
     let arrow = if collapsed { "▸ " } else { "▾ " };
     let mut spans = vec![
         Span::styled(arrow, Style::new().fg(FAINT)),
         Span::styled(e.cmd.clone(), ui::bold()),
     ];
     let mut used = 2 + e.cmd.width();
-    let right = time.len() + 2;
+    if run.0 > 1 {
+        let count = format!("  ×{}", run.0);
+        used += count.width();
+        spans.push(Span::styled(count, ui::muted()));
+    }
+    let right = time.width() + 2;
     if collapsed {
         // A peek at the output: its first non-empty line.
         let peek = e.lines.iter().map(SLine::text).find(|t| !t.trim().is_empty()).unwrap_or_default();
