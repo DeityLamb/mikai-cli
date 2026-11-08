@@ -2,6 +2,7 @@ mod api;
 mod cli;
 mod config;
 mod models;
+mod play;
 mod style;
 mod tui;
 mod view;

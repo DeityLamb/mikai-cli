@@ -83,6 +83,9 @@ pub enum Command {
         /// Лише надрукувати посилання
         #[arg(long)]
         print: bool,
+        /// Відкрити в mpv замість браузера (плеєри з прямим відео: ashdi)
+        #[arg(long, conflicts_with = "print")]
+        mpv: bool,
     },
     /// Розклад виходу серій на тиждень
     Schedule {
@@ -263,9 +266,9 @@ pub fn run(cmd: Command, ctx: &mut Ctx) -> Result<()> {
             let r = resolve_cli(ctx, &anime)?;
             episodes(ctx, &r, team, kind)
         }
-        Command::Open { anime, episode, team, kind, provider, print } => {
+        Command::Open { anime, episode, team, kind, provider, print, mpv } => {
             let r = resolve_cli(ctx, &anime)?;
-            open_episode(ctx, &r, episode, team, kind, provider, print)
+            open_episode(ctx, &r, episode, Filter { team, kind, provider, mpv }, print)
         }
         Command::Schedule { day } => {
             if ctx.json {
@@ -427,59 +430,90 @@ fn episodes(ctx: &Ctx, r: &str, team: Option<String>, kind: Option<String>) -> R
     Ok(())
 }
 
-fn open_episode(
-    ctx: &Ctx,
-    r: &str,
-    episode: Option<f64>,
-    team: Option<String>,
-    kind: Option<String>,
-    provider: Option<String>,
-    print: bool,
-) -> Result<()> {
-    let url = match episode {
-        None => ctx.client.anime(r)?.url().context("у аніме немає сторінки")?,
-        Some(n) => {
-            let p = ctx.client.player(r)?;
-            if p.licensed {
-                bail!("аніме ліцензоване в Україні, джерел немає");
-            }
-            let (rel, src) = pick_source(&p.releases, n, team.as_deref(), kind.as_deref(), provider.as_deref())
-                .with_context(|| format!("серію {} не знайдено за цим фільтром", fmt_num(n)))?;
-            if !print {
-                eprintln!("{} · {} · {}", rel.team_names(), rel.kind_label(), src.provider);
-            }
-            src.embed_url.clone()
-        }
-    };
-    if print {
-        println!("{url}");
-    } else {
-        eprintln!("{}", dim(&url));
-        open::that_detached(&url).context("не вдалося відкрити браузер")?;
-    }
-    Ok(())
+pub struct Filter {
+    pub team: Option<String>,
+    pub kind: Option<String>,
+    pub provider: Option<String>,
+    /// Only sources mpv can play.
+    pub mpv: bool,
 }
 
-/// First release (in API order) that matches the filters and has episode `n`,
-/// and its source from the preferred provider (or the first one).
-pub fn pick_source<'a>(
-    releases: &'a [Release],
-    n: f64,
-    team: Option<&str>,
-    kind: Option<&str>,
-    provider: Option<&str>,
-) -> Option<(&'a Release, &'a Source)> {
-    releases
+fn open_episode(ctx: &Ctx, r: &str, episode: Option<f64>, filter: Filter, print: bool) -> Result<()> {
+    let Some(n) = episode else {
+        let url = ctx.client.anime(r)?.url().context("у аніме немає сторінки")?;
+        if print {
+            println!("{url}");
+        } else {
+            open::that_detached(&url).context("не вдалося відкрити браузер")?;
+        }
+        return Ok(());
+    };
+    let p = ctx.client.player(r)?;
+    if p.licensed {
+        bail!("аніме ліцензоване в Україні, джерел немає");
+    }
+    let (rel, ep, src) = pick(&p.releases, n, &filter)?;
+    if print {
+        println!("{}", src.embed_url);
+        return Ok(());
+    }
+    eprintln!("{} · {} · {}", rel.team_names(), rel.kind_label(), src.provider);
+    play(&media_title(p.anime.titles.main(), ep, rel), src, filter.mpv)
+}
+
+/// Window title for the player.
+pub fn media_title(anime: &str, ep: &Episode, rel: &Release) -> String {
+    format!("{anime} — {} еп. ({})", ep.label(), rel.team_names())
+}
+
+/// Opens `src` in mpv or in the browser.
+pub fn play(title: &str, src: &Source, mpv: bool) -> Result<()> {
+    if mpv {
+        let stream = crate::play::stream(&src.embed_url)?;
+        crate::play::launch_mpv(&stream, title)
+    } else {
+        open::that_detached(&src.embed_url).context("не вдалося відкрити браузер")
+    }
+}
+
+/// The source of episode `n`: first matching release (in API order) that has
+/// the episode and a suitable source.
+pub fn pick<'a>(releases: &'a [Release], n: f64, f: &Filter) -> Result<(&'a Release, &'a Episode, &'a Source)> {
+    let mut last_err = None;
+    for r in releases
         .iter()
-        .filter(|r| kind.is_none_or(|k| r.kind == k))
-        .filter(|r| team.is_none_or(|t| r.matches(t)))
-        .find_map(|r| {
-            let ep = r.episodes.iter().find(|e| e.number == n)?;
-            let src = provider
-                .and_then(|p| ep.sources.iter().find(|s| s.provider.eq_ignore_ascii_case(p)))
-                .or_else(|| ep.sources.first())?;
-            Some((r, src))
-        })
+        .filter(|r| f.kind.as_deref().is_none_or(|k| r.kind == k))
+        .filter(|r| f.team.as_deref().is_none_or(|t| r.matches(t)))
+    {
+        let Some(ep) = r.episodes.iter().find(|e| e.number == n) else { continue };
+        match choose_source(ep, f.provider.as_deref(), f.mpv) {
+            Ok(src) => return Ok((r, ep, src)),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("серії {} немає за цим фільтром", fmt_num(n))))
+}
+
+pub fn choose_source<'a>(ep: &'a Episode, provider: Option<&str>, mpv: bool) -> Result<&'a Source> {
+    if let Some(p) = provider {
+        let src = ep
+            .sources
+            .iter()
+            .find(|s| s.provider.eq_ignore_ascii_case(p))
+            .with_context(|| format!("серії {} немає в плеєрі {p}", ep.label()))?;
+        if mpv && !crate::play::supports_mpv(&src.provider) {
+            bail!("плеєр {p} не віддає пряме відео, mpv його не відкриє — дивіться в браузері");
+        }
+        return Ok(src);
+    }
+    if mpv {
+        return ep
+            .sources
+            .iter()
+            .find(|s| crate::play::supports_mpv(&s.provider))
+            .with_context(|| format!("серію {} немає в плеєрі, який відкриває mpv (ashdi) — дивіться в браузері", ep.label()));
+    }
+    ep.sources.first().with_context(|| format!("у серії {} немає джерел", ep.label()))
 }
 
 // ---------- account ----------

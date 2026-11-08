@@ -39,6 +39,8 @@ use crate::{
     view::{self, Lines, SLine, Seg, Tone, blank, dim, err, plain},
 };
 
+mod page;
+
 const ACCENT: Color = Color::Rgb(224, 69, 123);
 const PANEL: Color = Color::Rgb(32, 30, 38);
 const SELECTED: Color = Color::Rgb(70, 36, 54);
@@ -62,8 +64,10 @@ const COMMANDS: &[Spec] = &[
     Spec { name: "search", aliases: &["s"], args: "<назва>", help: "пошук аніме" },
     Spec { name: "show", aliases: &["a", "open"], args: "<аніме|#N>", help: "відкрити аніме як сесію" },
     Spec { name: "eps", aliases: &["e"], args: "[команда|#N]", help: "релізи, а з командою — серії" },
-    Spec { name: "watch", aliases: &["w"], args: "<серія> [команда] [плеєр]", help: "відкрити серію в браузері" },
-    Spec { name: "next", aliases: &["n"], args: "", help: "наступна серія" },
+    Spec { name: "watch", aliases: &["w"], args: "<серія> [команда] [плеєр] [--mpv]", help: "відкрити серію в браузері" },
+    Spec { name: "play", aliases: &["p", "mpv"], args: "<серія> [команда] [плеєр]", help: "відкрити серію в mpv" },
+    Spec { name: "next", aliases: &["n"], args: "[--mpv]", help: "наступна серія" },
+    Spec { name: "view", aliases: &["v"], args: "[аніме|#N]", help: "сторінка перегляду тайтлу" },
     Spec { name: "ep", aliases: &[], args: "<N>", help: "переглянуто до серії N" },
     Spec { name: "status", aliases: &["st"], args: "<статус>", help: "дивлюсь, заплановано, переглянуто…" },
     Spec { name: "score", aliases: &[], args: "<0.5–10|0>", help: "оцінка (0 — прибрати)" },
@@ -119,6 +123,7 @@ fn welcome_lines() -> Lines {
         SLine::of("mikai", Tone::Accent).push("  аніме з українським озвученням у терміналі", Tone::Dim),
         blank(),
         plain("Почніть з ").push("/search назва", Tone::Accent).push(" або натисніть ", Tone::Plain).push("Ctrl+P", Tone::Accent).push(".", Tone::Plain),
+        plain("Сторінка тайтлу з вибором серії та плеєра — ").push("/view назва", Tone::Accent).push(".", Tone::Plain),
         plain("Відкрите через ").push("/show", Tone::Accent).push(" аніме стає сесією: ", Tone::Plain).push("/eps", Tone::Accent).push(", ", Tone::Plain).push("/watch 3", Tone::Accent).push(", ", Tone::Plain).push("/next", Tone::Accent).push(" діють на нього.", Tone::Plain),
         plain("Усі команди — ").push("/help", Tone::Accent).push(". Історія зберігається між запусками.", Tone::Plain),
     ]
@@ -194,6 +199,8 @@ struct Outcome {
     last_ep: Option<(String, f64)>,
     /// `Some(None)` — logged out.
     auth: Option<Option<(String, String)>>,
+    /// Open the watch page for this anime.
+    page: Option<AnimeDetail>,
 }
 
 enum Msg {
@@ -264,6 +271,7 @@ struct App {
     release_refs: Vec<String>,
 
     palette: Option<Palette>,
+    page: Option<page::Page>,
     tick: usize,
     loading: usize,
     quit: bool,
@@ -310,6 +318,7 @@ impl App {
             anime_refs: saved.anime_refs,
             release_refs: saved.release_refs,
             palette: None,
+            page: None,
             tick: 0,
             loading: 0,
             quit: false,
@@ -376,6 +385,9 @@ impl App {
                     Event::Mouse(m) => match m.kind {
                         MouseEventKind::ScrollUp => self.scroll_by(3),
                         MouseEventKind::ScrollDown => self.scroll_by(-3),
+                        MouseEventKind::Down(event::MouseButton::Left) if self.palette.is_none() && self.page.is_some() => {
+                            self.page_click(m.column, m.row);
+                        }
                         MouseEventKind::Down(event::MouseButton::Left) if self.palette.is_none() => {
                             let row = m.row.checked_sub(self.transcript_y).map(usize::from);
                             if let Some(i) = row.and_then(|r| self.row_owner.get(r).copied().flatten()) {
@@ -556,6 +568,9 @@ impl App {
                 }
             }
         }
+        if let Some(d) = o.page {
+            self.open_page(d);
+        }
         match o.auth {
             Some(Some((key, user))) => {
                 self.client.set_key(Some(key));
@@ -616,6 +631,10 @@ impl App {
         }
         if self.palette.is_some() {
             self.palette_key(k);
+            return;
+        }
+        if self.page.is_some() {
+            self.page_key(k);
             return;
         }
         if self.block_key(k) {
@@ -847,7 +866,11 @@ impl App {
                 let mut v = vec![PItem { label: "Пошук аніме…".into(), hint: "/search".into(), action: PAction::Search }];
                 if let Some(s) = &self.session {
                     v.push(PItem { label: format!("Серії «{}»…", s.title), hint: "/watch".into(), action: PAction::Releases });
+                    v.push(run("Сторінка перегляду", "/view", "/view"));
                     v.push(run("Дивитись наступну серію", "/next", "/next"));
+                    if crate::play::mpv_available() {
+                        v.push(run("Наступна серія в mpv", "/next --mpv", "/next --mpv"));
+                    }
                     v.push(run("Картка аніме", "/show", &format!("/show {}", s.r)));
                     v.push(run("Сторінка на mikai.me", "/site", "/site"));
                     if self.client.has_key() {
@@ -891,7 +914,7 @@ impl App {
                         .flatten()
                         .collect::<Vec<_>>()
                         .join(" · ");
-                    Some(PItem { label: a.titles.main().into(), hint, action: PAction::Run(format!("/show {}", a.reference()?)) })
+                    Some(PItem { label: a.titles.main().into(), hint, action: PAction::Run(format!("/view {}", a.reference()?)) })
                 })
                 .collect(),
             PMode::Releases => self
@@ -1037,6 +1060,15 @@ impl App {
 
     fn draw(&mut self, f: &mut Frame) {
         let area = f.area();
+        if self.page.is_some() {
+            let main = Rect { height: area.height.saturating_sub(1), ..area };
+            self.draw_page(f, main);
+            self.draw_status(f, Rect { y: area.y + area.height.saturating_sub(1), height: 1, ..area });
+            if self.palette.is_some() {
+                self.draw_palette(f, area);
+            }
+            return;
+        }
         let bottom_h = 1 + 1 + 3 + 1; // gap, session, input with rules, status
         let transcript = Rect { height: area.height.saturating_sub(bottom_h), ..area };
         let y = transcript.y + transcript.height;
@@ -1209,7 +1241,9 @@ impl App {
         }
         f.render_widget(Line::from(left), area);
         let user = self.user.clone().unwrap_or_else(|| "не увійшли".into());
-        let right = if self.focus.is_some() {
+        let right = if self.page.is_some() {
+            format!("{} ", self.page_hints())
+        } else if self.focus.is_some() {
             "enter згорнути/розгорнути · ctrl+↑↓ блоки · esc назад ".to_string()
         } else {
             format!("ctrl+p меню · ctrl+↑ блоки · ctrl+o згорнути · {user} ")
@@ -1492,7 +1526,7 @@ impl Snap {
     }
 }
 
-fn open_anime(snap: &Snap, r: &str, detail: Option<AnimeDetail>) -> Result<Outcome> {
+fn open_anime(snap: &Snap, r: &str, detail: Option<AnimeDetail>, page: bool) -> Result<Outcome> {
     let c = &snap.client;
     let d = match detail {
         Some(d) => d,
@@ -1500,11 +1534,23 @@ fn open_anime(snap: &Snap, r: &str, detail: Option<AnimeDetail>) -> Result<Outco
     };
     let r = d.ids.mikai.map(|i| i.to_string()).unwrap_or_else(|| r.to_string());
     let entry = if c.has_key() { Some(cli::entry_of(c, &r)?) } else { None };
-    let mut lines = view::anime_card(&d, entry.as_ref().map(|e| e.as_ref()), true);
-    lines.push(dim("/eps #N — серії команди · /watch N — дивитись · /status, /ep — список"));
-    let keep_team = snap.session.as_ref().filter(|s| s.r == r).and_then(|s| s.team.clone());
+    let prev = snap.session.as_ref().filter(|s| s.r == r);
+    let keep_team = prev.and_then(|s| s.team.clone());
+    let last_ep = prev.and_then(|s| s.last_ep);
+    let (lines, player) = if page {
+        let player = match prev.and_then(|s| s.player.clone()) {
+            Some(p) => p,
+            None => c.player(&r)?,
+        };
+        (vec![SLine::of("Сторінка перегляду: ", Tone::Dim).push(d.titles.main(), Tone::Bold)], Some(player))
+    } else {
+        let mut lines = view::anime_card(&d, entry.as_ref().map(|e| e.as_ref()), true);
+        lines.push(dim("/view — сторінка перегляду · /eps #N — серії · /watch N — дивитись"));
+        (lines, prev.and_then(|s| s.player.clone()))
+    };
     Ok(Outcome {
         lines,
+        page: page.then(|| d.clone()),
         release_refs: Some(d.releases.iter().map(|x| x.id.clone()).collect()),
         open: Some(Session {
             r: r.clone(),
@@ -1512,32 +1558,37 @@ fn open_anime(snap: &Snap, r: &str, detail: Option<AnimeDetail>) -> Result<Outco
             url: d.url(),
             episodes: d.episodes.clone(),
             team: keep_team,
-            last_ep: None,
-            player: None,
+            last_ep,
+            player,
             entry,
         }),
         ..Default::default()
     })
 }
 
-fn watch(snap: &Snap, n: f64, team: Option<String>, provider: Option<&str>) -> Result<Outcome> {
+fn watch(snap: &Snap, n: f64, team: Option<String>, provider: Option<&str>, mpv: bool) -> Result<Outcome> {
     let mut out = Outcome::default();
     let s = snap.session()?;
     let p = snap.player(&mut out)?;
     if p.licensed {
         bail!("аніме ліцензоване в Україні, джерел немає (/site)");
     }
-    let found = cli::pick_source(&p.releases, n, team.as_deref(), None, provider)
+    let filter = |team: Option<String>| cli::Filter { team, kind: None, provider: provider.map(str::to_string), mpv };
+    let (rel, ep, src) = match cli::pick(&p.releases, n, &filter(team.clone())) {
+        Ok(found) => found,
         // The remembered team may not have this episode yet: fall back to any.
-        .or_else(|| if team.is_some() { cli::pick_source(&p.releases, n, None, None, provider) } else { None });
-    let (rel, src) = found.with_context(|| format!("серії {} немає в жодному релізі", fmt_num(n)))?;
+        Err(_) if team.is_some() && provider.is_none() => cli::pick(&p.releases, n, &filter(None))?,
+        Err(e) => return Err(e),
+    };
+    cli::play(&cli::media_title(&s.title, ep, rel), src, mpv)?;
     out.lines.push(
-        SLine::of("▶ ", Tone::Accent)
-            .push(format!("{} еп.", fmt_num(n)), Tone::Bold)
+        SLine::of(if mpv { "▶ mpv  " } else { "▶ " }, Tone::Accent)
+            .push(format!("{} еп.", ep.label()), Tone::Bold)
             .push(format!("  {} · {} · {}", rel.team_names(), rel.kind_label(), src.provider), Tone::Plain),
     );
-    out.lines.push(dim(src.embed_url.clone()));
-    open::that_detached(&src.embed_url).context("не вдалося відкрити браузер")?;
+    if !mpv {
+        out.lines.push(dim(src.embed_url.clone()));
+    }
     out.team = Some((s.r.clone(), rel.id.clone()));
     out.last_ep = Some((s.r.clone(), n));
     if snap.client.has_key() {
@@ -1579,12 +1630,12 @@ fn exec(name: &str, args: &str, snap: &Snap) -> Result<Outcome> {
             if args.is_empty() {
                 bail!("яке аніме? /show <назва|id|#N>");
             }
-            return open_anime(snap, &snap.anime(args)?, None);
+            return open_anime(snap, &snap.anime(args)?, None, false);
         }
         "random" => {
             let d = c.random()?;
             let r = d.ids.mikai.map(|i| i.to_string()).unwrap_or_default();
-            return open_anime(snap, &r, Some(d));
+            return open_anime(snap, &r, Some(d), false);
         }
         "eps" => {
             let s = snap.session()?;
@@ -1605,19 +1656,31 @@ fn exec(name: &str, args: &str, snap: &Snap) -> Result<Outcome> {
                 out.team = Some((s.r.clone(), rel.id.clone()));
             }
         }
-        "watch" => {
-            let n: f64 = words.first().context("яку серію? /watch <N> [команда] [плеєр]")?.replace(',', ".").parse().context("номер серії має бути числом")?;
-            let team = match words.get(1) {
+        "watch" | "play" => {
+            let mpv = name == "play" || words.iter().any(|w| *w == "--mpv" || *w == "-m");
+            let pos: Vec<&str> = words.iter().copied().filter(|w| !w.starts_with('-')).collect();
+            let n: f64 = pos
+                .first()
+                .with_context(|| format!("яку серію? /{name} <N> [команда] [плеєр]"))?
+                .replace(',', ".")
+                .parse()
+                .context("номер серії має бути числом")?;
+            let team = match pos.get(1) {
                 Some(t) => Some(snap.release_filter(t)?),
                 None => snap.session()?.team.clone(),
             };
-            return watch(snap, n, team, words.get(2).copied());
+            return watch(snap, n, team, pos.get(2).copied(), mpv);
         }
         "next" => {
             let s = snap.session()?;
             let watched = s.entry.clone().flatten().and_then(|e| e.episodes).unwrap_or(0.0);
             let n = s.last_ep.unwrap_or(0.0).max(watched).floor() + 1.0;
-            return watch(snap, n, s.team.clone(), None);
+            let mpv = words.iter().any(|w| *w == "--mpv" || *w == "-m");
+            return watch(snap, n, s.team.clone(), None, mpv);
+        }
+        "view" => {
+            let r = snap.anime(args)?;
+            return open_anime(snap, &r, None, true);
         }
         "ep" => {
             let n: i64 = args.parse().context("/ep <номер серії>")?;

@@ -20,9 +20,11 @@ mikai
 
 ```
 /search frieren        пошук, рядки нумеруються
+/view frieren          сторінка перегляду: інфо, вибір озвучки й серії, mpv / браузер
 /show #1               відкрити аніме — воно стає поточною сесією
 /eps                   релізи по командах;  /eps #2 — серії команди
 /watch 3               відкрити серію в браузері (команда запамʼятовується)
+/play 3                те саме в mpv
 /next                  наступна серія
 /ep 3 · /status watching · /score 9
 /schedule today · /updates · /list · /login
@@ -40,6 +42,7 @@ mikai show frieren                   # картка (id, mal:52991, посила
 mikai eps frieren                    # релізи по командах
 mikai eps frieren -t inari           # серії релізу
 mikai open frieren -e 3 -t inari     # відкрити серію в браузері (--print — лише посилання)
+mikai open frieren -e 3 --mpv        # у mpv
 mikai schedule -d today              # розклад
 mikai updates                        # новинки
 
@@ -56,3 +59,7 @@ mikai api anime/1272/staff -q limit=5   # будь-який ендпоінт, с
 `--json` друкує сиру відповідь API для будь-якої команди. Ключ зберігається в `~/.config/mikai/config.json` (права 600), або передається через `MIKAI_API_KEY`.
 
 Дані — [mikai.me](https://mikai.me). Відео належать провайдерам плеєрів. Проєкт не повʼязаний з командою Mikai.
+
+## mpv
+
+API дає лише сторінки плеєрів. У mpv відкриваються серії з плеєрів, які віддають пряме відео (зараз це ashdi, позначено ◆). Інші плеєри шифрують потік — їх mikai відкриває в браузері й нічого не обходить.
