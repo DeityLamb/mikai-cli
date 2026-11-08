@@ -50,7 +50,8 @@ pub(super) enum Hit {
 }
 
 pub(super) struct Page {
-    pub r: String,
+    /// The title's state: player, list entry, last team and episode.
+    pub s: Session,
     detail: AnimeDetail,
     focus: Focus,
     /// Track shown: `voice` or `sub`.
@@ -71,9 +72,9 @@ pub(super) struct Page {
 }
 
 impl Page {
-    pub fn new(detail: AnimeDetail, session: &Session) -> Self {
+    pub fn new(detail: AnimeDetail, session: Session) -> Self {
         let mut page = Self {
-            r: session.r.clone(),
+            s: session,
             detail,
             focus: Focus::Episodes,
             kind: "voice".into(),
@@ -90,13 +91,16 @@ impl Page {
             hits: vec![],
             last_cmd: None,
         };
-        if let Some(p) = &session.player {
-            let remembered = session.team.as_ref().and_then(|t| p.releases.iter().position(|r| &r.id == t));
-            page.rel = remembered.or_else(|| best_release(p, None, page.mpv)).unwrap_or(0);
-            if let Some(r) = p.releases.get(page.rel) {
-                page.kind = r.kind.clone();
+        if let Some(p) = &page.s.player {
+            let remembered = page.s.team.as_ref().and_then(|t| p.releases.iter().position(|r| &r.id == t));
+            let rel = remembered.or_else(|| best_release(p, None, page.mpv)).unwrap_or(0);
+            let kind = p.releases.get(rel).map(|r| r.kind.clone());
+            let ep = next_episode(p.releases.get(rel), &page.s);
+            page.rel = rel;
+            page.ep = ep;
+            if let Some(k) = kind {
+                page.kind = k;
             }
-            page.ep = next_episode(p.releases.get(page.rel), session);
         }
         page
     }
@@ -150,17 +154,14 @@ fn follow(scroll: usize, sel: usize, h: usize) -> usize {
 }
 
 impl App {
-    pub(super) fn open_page(&mut self, detail: AnimeDetail) {
-        if let Some(s) = &self.session {
-            self.page = Some(Page::new(detail, s));
-        }
+    pub(super) fn open_page(&mut self, detail: AnimeDetail, session: Session) {
+        self.page = Some(Page::new(detail, session));
     }
 
-    /// The page with its session and player, if the page still matches the session.
+    /// The page with its title state and player.
     fn page_parts(&self) -> Option<(&Page, &Session, Option<&Player>)> {
         let p = self.page.as_ref()?;
-        let s = self.session.as_ref().filter(|s| s.r == p.r)?;
-        Some((p, s, s.player.as_ref()))
+        Some((p, &p.s, p.s.player.as_ref()))
     }
 
     fn current(&self) -> Option<(&Release, &Episode)> {
@@ -185,52 +186,82 @@ impl App {
         self.page.as_ref().is_some_and(|p| p.mpv) && self.current_source().is_some_and(|s| play::supports_mpv(&s.provider))
     }
 
-    fn page_run(&mut self, cmd: String) {
-        self.submit(cmd);
-        let id = self.entries.last().map(|e| e.id);
+    fn set_last(&mut self, id: u64) {
         if let Some(p) = &mut self.page {
-            p.last_cmd = id;
+            p.last_cmd = Some(id);
         }
     }
 
     /// A local message in the result line, also kept in the transcript.
     fn page_note(&mut self, text: &str) {
         self.note(vec![SLine::of(text, Tone::Yellow)]);
-        let id = self.entries.last().map(|e| e.id);
-        if let Some(p) = &mut self.page {
-            p.last_cmd = id;
+        if let Some(id) = self.entries.last().map(|e| e.id) {
+            self.set_last(id);
         }
     }
 
     fn page_action(&mut self, b: Btn) {
+        let Some((_, s, _)) = self.page_parts() else { return };
+        let (r, title, url, entry) = (s.r.clone(), s.title.clone(), s.url.clone(), s.entry.clone().flatten());
         let Some((rel, ep)) = self.current() else { return };
-        let (n, rel_id) = (ep.number, rel.id.clone());
-        let provider = self.current_source().map(|s| s.provider.clone()).unwrap_or_default();
-        let cmd = match b {
-            Btn::Mpv => {
-                if !self.page.as_ref().is_some_and(|p| p.mpv) {
-                    self.page_note("mpv не встановлено");
-                    return;
+        let (rel, ep) = (rel.clone(), ep.clone());
+        let src = self.current_source().cloned();
+        let id = match b {
+            Btn::Mpv | Btn::Browser => {
+                let mpv = b == Btn::Mpv;
+                if mpv && !self.page.as_ref().is_some_and(|p| p.mpv) {
+                    return self.page_note("mpv не встановлено");
                 }
-                if !self.mpv_ready() {
-                    self.page_note("цей плеєр не віддає пряме відео — оберіть плеєр з ◆ (p) або браузер (b)");
-                    return;
+                if mpv && !self.mpv_ready() {
+                    return self.page_note("цей плеєр не віддає пряме відео — оберіть інший плеєр (p) або браузер (b)");
                 }
-                format!("/play {} {rel_id} {provider}", fmt_num(n))
+                let Some(src) = src else { return };
+                self.run_action(move |_| {
+                    cli::play(&cli::media_title(&title, &ep, &rel), &src, mpv)?;
+                    let line = SLine::of("▶ ", Tone::Accent)
+                        .push(title.clone(), Tone::Bold)
+                        .push(format!("  ·  {} еп.  ·  {}  ·  {}", ep.label(), rel.team_names(), if mpv { "mpv".to_string() } else { src.provider.clone() }), Tone::Dim);
+                    let played = Recent { r, title, ep: ep.number, team: Some(rel.id.clone()), team_name: Some(rel.team_names()), at: Utc::now() };
+                    Ok(Outcome { lines: vec![line], played: Some(played), ..Default::default() })
+                })
             }
-            Btn::Browser => format!("/watch {} {rel_id} {provider}", fmt_num(n)),
-            Btn::Watched => format!("/ep {}", fmt_num(n.floor())),
-            Btn::Status => {
-                let cur = self.session.as_ref().and_then(|s| s.entry.clone().flatten()).map(|e| e.status);
-                let next = match cur.and_then(|c| LIST_STATUSES.iter().position(|s| *s == c)) {
-                    Some(i) => LIST_STATUSES[(i + 1) % LIST_STATUSES.len()],
-                    None => "watching",
+            Btn::Watched | Btn::Status => {
+                if !self.client.has_key() {
+                    return self.page_note("щоб вести списки, увійдіть: /login");
+                }
+                let patch = if b == Btn::Watched {
+                    let mut p = json!({ "episodes": ep.number.floor() as i64 });
+                    if entry.is_none() {
+                        p["status"] = json!("watching");
+                    }
+                    p
+                } else {
+                    let next = match entry.as_ref().and_then(|e| LIST_STATUSES.iter().position(|s| *s == e.status)) {
+                        Some(i) => LIST_STATUSES[(i + 1) % LIST_STATUSES.len()],
+                        None => "watching",
+                    };
+                    json!({ "status": next })
                 };
-                format!("/status {next}")
+                self.run_action(move |c| {
+                    let e = c.save_entry(&r, &patch)?;
+                    let what = if b == Btn::Watched {
+                        format!("переглянуто до {}", e.episodes.map(fmt_num).unwrap_or_else(|| "0".into()))
+                    } else {
+                        format!("список: {}", list_status_label(&e.status))
+                    };
+                    let line = SLine::of("✓ ", Tone::Green).push(title, Tone::Bold).push(format!("  ·  {what}"), Tone::Dim);
+                    Ok(Outcome { lines: vec![line], entry: Some((r, Some(e))), ..Default::default() })
+                })
             }
-            Btn::Site => "/site".into(),
+            Btn::Site => {
+                let Some(url) = url else { return };
+                self.run_action(move |_| {
+                    open::that_detached(&url).context("не вдалося відкрити браузер")?;
+                    Ok(Outcome { lines: vec![SLine::of("↗ ", Tone::Accent).push(title, Tone::Bold).push("  ·  mikai.me", Tone::Dim)], ..Default::default() })
+                })
+            }
         };
-        self.page_run(cmd);
+        self.set_last(id);
     }
 
     fn primary(&mut self) {

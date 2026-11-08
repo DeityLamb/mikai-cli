@@ -164,8 +164,12 @@ impl Client {
         self.get(&format!("anime/{}", enc(r)), &[])
     }
 
+    /// A random title. The endpoint gives a short card, so the full one is
+    /// fetched by its id.
     pub fn random(&self) -> Result<AnimeDetail> {
-        self.get("anime/random", &[])
+        let short: AnimeShort = self.get("anime/random", &[])?;
+        let id = short.reference().context("у випадкового аніме немає id")?;
+        self.anime(&id)
     }
 
     pub fn player(&self, r: &str) -> Result<Player> {

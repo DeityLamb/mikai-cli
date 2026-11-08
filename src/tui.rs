@@ -59,29 +59,13 @@ struct Spec {
 
 const COMMANDS: &[Spec] = &[
     Spec { name: "search", aliases: &["s"], args: "<назва>", help: "пошук аніме" },
-    Spec { name: "show", aliases: &["a", "open"], args: "<аніме|#N>", help: "відкрити аніме як сесію" },
-    Spec { name: "eps", aliases: &["e"], args: "[команда|#N]", help: "релізи, а з командою — серії" },
-    Spec { name: "watch", aliases: &["w"], args: "<серія> [команда] [плеєр] [--mpv]", help: "відкрити серію в браузері" },
-    Spec { name: "play", aliases: &["p", "mpv"], args: "<серія> [команда] [плеєр]", help: "відкрити серію в mpv" },
-    Spec { name: "next", aliases: &["n"], args: "[--mpv]", help: "наступна серія" },
-    Spec { name: "view", aliases: &["v"], args: "[аніме|#N]", help: "сторінка перегляду тайтлу" },
-    Spec { name: "resume", aliases: &["continue", "c"], args: "[аніме]", help: "продовжити: сторінка на наступній серії" },
-    Spec { name: "ep", aliases: &[], args: "<N>", help: "переглянуто до серії N" },
-    Spec { name: "status", aliases: &["st"], args: "<статус>", help: "дивлюсь, заплановано, переглянуто…" },
-    Spec { name: "score", aliases: &[], args: "<0.5–10|0>", help: "оцінка (0 — прибрати)" },
-    Spec { name: "rm", aliases: &[], args: "", help: "прибрати зі списків" },
-    Spec { name: "site", aliases: &[], args: "", help: "сторінка аніме на mikai.me" },
-    Spec { name: "close", aliases: &[], args: "", help: "закрити поточне аніме" },
+    Spec { name: "view", aliases: &["v", "open"], args: "<аніме|#N>", help: "сторінка тайтлу: серії, плеєр, список" },
     Spec { name: "random", aliases: &[], args: "", help: "випадкове аніме" },
     Spec { name: "schedule", aliases: &["sch"], args: "[день]", help: "розклад виходу серій" },
     Spec { name: "updates", aliases: &["new"], args: "[кількість]", help: "щойно додані серії" },
     Spec { name: "list", aliases: &["ls"], args: "[статус]", help: "мої списки" },
-    Spec { name: "history", aliases: &[], args: "", help: "історія переглядів" },
-    Spec { name: "notif", aliases: &[], args: "[all|read]", help: "сповіщення" },
-    Spec { name: "translit", aliases: &[], args: "<текст>", help: "українська транслітерація" },
     Spec { name: "login", aliases: &[], args: "[mk_…]", help: "увійти (за посиланням або ключем)" },
     Spec { name: "logout", aliases: &[], args: "", help: "вийти" },
-    Spec { name: "whoami", aliases: &["me"], args: "", help: "акаунт і ліміти" },
     Spec { name: "clear", aliases: &[], args: "", help: "очистити історію" },
     Spec { name: "help", aliases: &["?"], args: "", help: "довідка" },
     Spec { name: "quit", aliases: &["q", "exit"], args: "", help: "вихід" },
@@ -98,12 +82,13 @@ fn help_lines() -> Lines {
         out.push(SLine::new().col(&names, 18, Tone::Accent).col(c.args, 26, Tone::Plain).push(c.help, Tone::Dim).nowrap());
     }
     out.push(blank());
-    out.push(dim("#N посилається на рядок останнього списку: /show #2, /eps #1. Аніме — id, mal:21, посилання або назва."));
+    out.push(dim("#N — рядок останнього списку: /view #2. Аніме — назва, id, mal:21 або посилання."));
     out.push(blank());
     out.push(SLine::of("Клавіші", Tone::Bold));
     for (k, d) in [
         ("Ctrl+P", "меню: дії, пошук аніме, вибір серії"),
         ("Ctrl+H", "нещодавно переглянуті — продовжити з наступної серії"),
+        ("на сторінці тайтлу", "c команда · p плеєр · ⏎ дивитись · w переглянуто · s список"),
         ("Tab", "доповнити команду"),
         ("↑ ↓", "попередні команди"),
         ("PgUp PgDn, колесо", "гортати історію (Esc — донизу)"),
@@ -121,35 +106,26 @@ fn welcome_lines() -> Lines {
     vec![
         SLine::of("mikai", Tone::Accent).push("  аніме з українським озвученням у терміналі", Tone::Dim),
         blank(),
-        plain("Почніть з ").push("/search назва", Tone::Accent).push(" або натисніть ", Tone::Plain).push("Ctrl+P", Tone::Accent).push(".", Tone::Plain),
-        plain("Сторінка тайтлу з вибором серії та плеєра — ").push("/view назва", Tone::Accent).push(".", Tone::Plain),
-        plain("Відкрите через ").push("/show", Tone::Accent).push(" аніме стає сесією: ", Tone::Plain).push("/eps", Tone::Accent).push(", ", Tone::Plain).push("/watch 3", Tone::Accent).push(", ", Tone::Plain).push("/next", Tone::Accent).push(" діють на нього.", Tone::Plain),
-        plain("Усі команди — ").push("/help", Tone::Accent).push(". Історія зберігається між запусками.", Tone::Plain),
+        plain("Знайдіть тайтл: ").push("/search назва", Tone::Accent).push(" або ", Tone::Plain).push("Ctrl+P", Tone::Accent).push(".", Tone::Plain),
+        plain("Дивіться на сторінці тайтлу: ").push("/view назва", Tone::Accent).push(" — серії, озвучення, mpv чи браузер.", Tone::Plain),
+        plain("Продовжити, де зупинились — ").push("Ctrl+H", Tone::Accent).push(". Усі команди — ", Tone::Plain).push("/help", Tone::Accent).push(".", Tone::Plain),
     ]
 }
 
 // ---------- state ----------
 
-/// The anime the prompt is working on.
+/// What the watch page knows about its title.
 #[derive(Clone)]
 struct Session {
     r: String,
     title: String,
     url: Option<String>,
-    episodes: EpisodesInfo,
     /// Last release used, as a release id.
     team: Option<String>,
     last_ep: Option<f64>,
     player: Option<Player>,
     /// `None` — unknown (not logged in), `Some(None)` — in no list.
     entry: Option<Option<ListEntry>>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-struct SavedSession {
-    r: String,
-    title: String,
-    team: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -160,6 +136,9 @@ struct Entry {
     lines: Lines,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     collapsed: bool,
+    /// A page action (played, marked watched…): one line with its time.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    action: bool,
     #[serde(skip)]
     pending: bool,
     #[serde(skip)]
@@ -168,7 +147,7 @@ struct Entry {
     cache: Option<(u16, Vec<Line<'static>>)>,
 }
 
-/// A title that was watched, for Ctrl+H and `/resume`.
+/// A title that was watched, for Ctrl+H and the watch page.
 #[derive(Serialize, Deserialize, Clone)]
 struct Recent {
     r: String,
@@ -198,12 +177,9 @@ fn ago(at: DateTime<Utc>) -> String {
 struct SavedState {
     entries: Vec<Entry>,
     inputs: Vec<String>,
-    session: Option<SavedSession>,
-    /// Targets of `#N` in the last anime list and release list.
+    /// Targets of `#N` in the last list.
     #[serde(default)]
     anime_refs: Vec<String>,
-    #[serde(default)]
-    release_refs: Vec<String>,
     #[serde(default)]
     recent: Vec<Recent>,
 }
@@ -212,29 +188,25 @@ fn state_path() -> Option<PathBuf> {
     dirs::state_dir().or_else(dirs::data_local_dir).map(|d| d.join("mikai").join("session.json"))
 }
 
-/// What a finished command changes besides printing.
+/// What a finished command or page action changes besides printing.
 #[derive(Default)]
 struct Outcome {
     lines: Lines,
     anime_refs: Option<Vec<AnimeShort>>,
-    release_refs: Option<Vec<String>>,
-    open: Option<Session>,
-    close: bool,
-    player: Option<(String, Player)>,
+    /// Open the watch page.
+    page: Option<(AnimeDetail, Session)>,
+    /// New list entry of a title (`None` — removed from lists).
     entry: Option<(String, Option<ListEntry>)>,
-    team: Option<(String, String)>,
-    last_ep: Option<(String, f64)>,
+    /// Episode `n` of a title was opened with this release.
+    played: Option<Recent>,
     /// `Some(None)` — logged out.
     auth: Option<Option<(String, String)>>,
-    /// Open the watch page for this anime.
-    page: Option<AnimeDetail>,
 }
 
 enum Msg {
     Append(u64, Lines),
     Done(u64, Result<Outcome>),
     Found(u64, Result<Vec<AnimeShort>>),
-    Player(String, Result<Player>),
     History(Result<Vec<serde_json::Value>>),
     Teams(Result<Vec<Team>>),
 }
@@ -244,8 +216,6 @@ enum PAction {
     Run(String),
     Recent,
     Search,
-    Releases,
-    Episodes(usize),
 }
 
 struct PItem {
@@ -259,8 +229,6 @@ enum PMode {
     Actions,
     Recent,
     Search,
-    Releases,
-    Episodes(usize),
 }
 
 struct Palette {
@@ -297,9 +265,7 @@ struct App {
     draft: String,
     ac_sel: usize,
 
-    session: Option<Session>,
     anime_refs: Vec<String>,
-    release_refs: Vec<String>,
     recent: Vec<Recent>,
     /// Team id → name, for releases known only by id (`t_35:voice`).
     team_names: std::collections::HashMap<i64, String>,
@@ -348,9 +314,7 @@ impl App {
             recall: None,
             draft: String::new(),
             ac_sel: 0,
-            session: None,
             anime_refs: saved.anime_refs,
-            release_refs: saved.release_refs,
             recent: saved.recent,
             team_names: Default::default(),
             palette: None,
@@ -368,21 +332,6 @@ impl App {
             app.note(welcome_lines());
         } else {
             app.note(vec![dim(format!("── {} ──", Local::now().format("%d.%m.%Y %H:%M")))]);
-        }
-        if let Some(s) = saved.session {
-            app.session = Some(Session {
-                r: s.r.clone(),
-                title: s.title,
-                url: None,
-                episodes: EpisodesInfo::default(),
-                team: s.team,
-                last_ep: None,
-                player: None,
-                entry: None,
-            });
-            // Refresh the restored session quietly.
-            let r = s.r.clone();
-            app.spawn_raw(move |c| Msg::Player(r.clone(), c.player(&r)));
         }
         app
     }
@@ -411,9 +360,7 @@ impl App {
             "entries": self.entries[skip..].iter().filter(|e| !e.pending).collect::<Vec<_>>(),
             "inputs": &self.inputs[self.inputs.len().saturating_sub(MAX_INPUTS)..],
             "anime_refs": &self.anime_refs,
-            "release_refs": &self.release_refs,
             "recent": &self.recent,
-            "session": self.session.as_ref().map(|s| SavedSession { r: s.r.clone(), title: s.title.clone(), team: s.team.clone() }),
         });
         let _ = fs::create_dir_all(path.parent().unwrap());
         // Write to a side file and rename, so a reader never sees half a file.
@@ -425,7 +372,7 @@ impl App {
 
     fn note(&mut self, lines: Lines) {
         let id = self.bump();
-        self.entries.push(Entry { cmd: String::new(), at: Utc::now(), lines, pending: false, collapsed: false, id, cache: None });
+        self.entries.push(Entry { cmd: String::new(), at: Utc::now(), lines, pending: false, collapsed: false, action: false, id, cache: None });
         self.scroll = 0;
     }
 
@@ -492,7 +439,7 @@ impl App {
         let Some(spec) = find_command(&name.to_lowercase()) else {
             let id = self.bump();
             let lines = vec![err(format!("Невідома команда «{name}».")).push("  /help — список, Ctrl+P — меню", Tone::Dim)];
-            self.entries.push(Entry { cmd: display, at: Utc::now(), lines, pending: false, collapsed: false, id, cache: None });
+            self.entries.push(Entry { cmd: display, at: Utc::now(), lines, pending: false, collapsed: false, action: false, id, cache: None });
             return;
         };
 
@@ -509,28 +456,16 @@ impl App {
                 return;
             }
             "help" => Some(help_lines()),
-            "close" => Some(match self.session.take() {
-                Some(s) => vec![dim(format!("Закрито «{}»", s.title))],
-                None => vec![dim("Немає відкритого аніме")],
-            }),
             _ => None,
         };
         let id = self.bump();
         if let Some(lines) = local {
-            self.entries.push(Entry { cmd: display, at: Utc::now(), lines, pending: false, collapsed: false, id, cache: None });
+            self.entries.push(Entry { cmd: display, at: Utc::now(), lines, pending: false, collapsed: false, action: false, id, cache: None });
             return;
         }
 
-        self.entries.push(Entry { cmd: display, at: Utc::now(), lines: vec![], pending: true, collapsed: false, id, cache: None });
-        let snap = Snap {
-            client: self.client.clone(),
-            session: self.session.clone(),
-            anime_refs: self.anime_refs.clone(),
-            release_refs: self.release_refs.clone(),
-            recent: self.recent.clone(),
-            tx: self.tx.clone(),
-            id,
-        };
+        self.entries.push(Entry { cmd: display, at: Utc::now(), lines: vec![], pending: true, collapsed: false, action: false, id, cache: None });
+        let snap = self.snap(id);
         let name = spec.name;
         let tx = self.tx.clone();
         self.loading += 1;
@@ -538,6 +473,30 @@ impl App {
             let res = exec(name, &args, &snap);
             let _ = tx.send(Msg::Done(id, res));
         });
+    }
+
+    fn snap(&self, id: u64) -> Snap {
+        Snap {
+            client: self.client.clone(),
+            anime_refs: self.anime_refs.clone(),
+            recent: self.recent.clone(),
+            tx: self.tx.clone(),
+            id,
+        }
+    }
+
+    /// Runs a page action off the UI thread; it shows in the transcript as
+    /// one line, first with a spinner, then with the result.
+    fn run_action(&mut self, f: impl FnOnce(&Client) -> Result<Outcome> + Send + 'static) -> u64 {
+        let id = self.bump();
+        self.entries.push(Entry { cmd: String::new(), at: Utc::now(), lines: vec![], pending: true, collapsed: false, action: true, id, cache: None });
+        let client = self.client.clone();
+        let tx = self.tx.clone();
+        self.loading += 1;
+        thread::spawn(move || {
+            let _ = tx.send(Msg::Done(id, f(&client)));
+        });
+        id
     }
 
     fn entry_mut(&mut self, id: u64) -> Option<&mut Entry> {
@@ -605,16 +564,6 @@ impl App {
                     }
                 }
             }
-            Msg::Player(r, res) => {
-                self.loading = self.loading.saturating_sub(1);
-                if let (Ok(p), Some(s)) = (res, &mut self.session) {
-                    if s.r == r {
-                        s.title = p.anime.titles.main().to_string();
-                        s.url = p.anime.url();
-                        s.player = Some(p);
-                    }
-                }
-            }
         }
     }
 
@@ -622,44 +571,20 @@ impl App {
         if let Some(v) = o.anime_refs {
             self.anime_refs = v.iter().filter_map(AnimeShort::reference).collect();
         }
-        if let Some(v) = o.release_refs {
-            self.release_refs = v;
+        if let Some((detail, s)) = o.page {
+            self.open_page(detail, s);
         }
-        if o.close {
-            self.session = None;
-        }
-        if let Some(s) = o.open {
-            self.session = Some(s);
-        }
-        if let Some(s) = &mut self.session {
-            if let Some((r, p)) = o.player {
-                if s.r == r {
-                    s.player = Some(p);
-                }
-            }
-            if let Some((r, e)) = o.entry {
-                if s.r == r {
-                    s.entry = Some(e);
-                }
-            }
-            if let Some((r, t)) = o.team {
-                if s.r == r {
-                    s.team = Some(t);
-                }
-            }
-            if let Some((r, n)) = o.last_ep {
-                if s.r == r {
-                    s.last_ep = Some(n);
-                    let team_name = s.team.as_ref().and_then(|t| {
-                        s.player.as_ref().and_then(|p| p.releases.iter().find(|x| &x.id == t)).map(|x| x.team_names())
-                    });
-                    let rec = Recent { r, title: s.title.clone(), ep: n, team: s.team.clone(), team_name, at: Utc::now() };
-                    self.remember(rec);
-                }
+        if let Some((r, e)) = o.entry {
+            if let Some(s) = self.page_session(&r) {
+                s.entry = Some(e);
             }
         }
-        if let Some(d) = o.page {
-            self.open_page(d);
+        if let Some(rec) = o.played {
+            if let Some(s) = self.page_session(&rec.r) {
+                s.last_ep = Some(rec.ep);
+                s.team = rec.team.clone();
+            }
+            self.remember(rec);
         }
         match o.auth {
             Some(Some((key, user))) => {
@@ -669,13 +594,15 @@ impl App {
             Some(None) => {
                 self.client.set_key(None);
                 self.user = None;
-                if let Some(s) = &mut self.session {
-                    s.entry = None;
-                }
             }
             None => {}
         }
         o.lines
+    }
+
+    /// State of the open watch page, if it shows title `r`.
+    fn page_session(&mut self, r: &str) -> Option<&mut Session> {
+        self.page.as_mut().map(|p| &mut p.s).filter(|s| s.r == r)
     }
 
     // ---------- input ----------
@@ -1035,7 +962,7 @@ impl App {
                         .flatten()
                         .collect::<Vec<_>>()
                         .join(" · ");
-                    PItem { label: x.title.clone(), hint, action: PAction::Run(format!("/resume {}", x.r)) }
+                    PItem { label: x.title.clone(), hint, action: PAction::Run(format!("/view {}", x.r)) }
                 })
                 .collect(),
             PMode::Actions => {
@@ -1043,22 +970,6 @@ impl App {
                     PItem { label: "Пошук аніме…".into(), hint: "/search".into(), action: PAction::Search },
                     PItem { label: "Продовжити перегляд…".into(), hint: "Ctrl+H".into(), action: PAction::Recent },
                 ];
-                if let Some(s) = &self.session {
-                    v.push(PItem { label: format!("Серії «{}»…", s.title), hint: "/watch".into(), action: PAction::Releases });
-                    v.push(run("Сторінка перегляду", "/view", "/view"));
-                    v.push(run("Дивитись наступну серію", "/next", "/next"));
-                    if crate::play::mpv_available() {
-                        v.push(run("Наступна серія в mpv", "/next --mpv", "/next --mpv"));
-                    }
-                    v.push(run("Картка аніме", "/show", &format!("/show {}", s.r)));
-                    v.push(run("Сторінка на mikai.me", "/site", "/site"));
-                    if self.client.has_key() {
-                        for st in LIST_STATUSES {
-                            v.push(run(&format!("У список: {}", list_status_label(st)), "/status", &format!("/status {st}")));
-                        }
-                    }
-                    v.push(run("Закрити аніме", "/close", "/close"));
-                }
                 v.extend([
                     run("Розклад на сьогодні", "/schedule today", "/schedule today"),
                     run("Розклад на тиждень", "/schedule", "/schedule"),
@@ -1069,9 +980,6 @@ impl App {
                     v.extend([
                         run("Дивлюсь", "/list watching", "/list watching"),
                         run("Мої списки", "/list", "/list"),
-                        run("Історія переглядів", "/history", "/history"),
-                        run("Сповіщення", "/notif", "/notif"),
-                        run("Акаунт", "/whoami", "/whoami"),
                         run("Вийти", "/logout", "/logout"),
                     ]);
                 } else {
@@ -1096,43 +1004,6 @@ impl App {
                     Some(PItem { label: a.titles.main().into(), hint, action: PAction::Run(format!("/view {}", a.reference()?)) })
                 })
                 .collect(),
-            PMode::Releases => self
-                .session
-                .as_ref()
-                .and_then(|s| s.player.as_ref())
-                .map(|pl| {
-                    pl.releases
-                        .iter()
-                        .enumerate()
-                        .map(|(i, r)| PItem {
-                            label: r.team_names(),
-                            hint: format!(
-                                "{} · до {} еп.",
-                                r.kind_label(),
-                                r.last_episode.map(fmt_num).unwrap_or_else(|| "?".into())
-                            ),
-                            action: PAction::Episodes(i),
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-            PMode::Episodes(i) => {
-                let s = self.session.as_ref();
-                let watched = s.and_then(|s| s.entry.clone().flatten()).and_then(|e| e.episodes).unwrap_or(0.0);
-                s.and_then(|s| s.player.as_ref())
-                    .and_then(|pl| pl.releases.get(*i))
-                    .map(|r| {
-                        r.episodes
-                            .iter()
-                            .map(|e| PItem {
-                                label: format!("{} {} еп.", if e.number <= watched { "✓" } else { " " }, e.label()),
-                                hint: e.sources.iter().map(|s| s.provider.as_str()).collect::<Vec<_>>().join(" "),
-                                action: PAction::Run(format!("/watch {} {}", fmt_num(e.number), r.id)),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            }
         };
         if p.mode == PMode::Search || p.query.is_empty() {
             return items;
@@ -1149,10 +1020,7 @@ impl App {
                 if p.mode == PMode::Actions {
                     self.palette = None;
                 } else {
-                    p.mode = match p.mode {
-                        PMode::Episodes(_) => PMode::Releases,
-                        _ => PMode::Actions,
-                    };
+                    p.mode = PMode::Actions;
                     p.query.clear();
                     p.sel = 0;
                 }
@@ -1196,30 +1064,6 @@ impl App {
                         p.searched.clear();
                         p.sel = 0;
                     }
-                    PAction::Releases => {
-                        p.mode = PMode::Releases;
-                        p.query.clear();
-                        p.sel = 0;
-                        if let Some(s) = &self.session {
-                            if s.player.is_none() {
-                                let r = s.r.clone();
-                                self.spawn_raw(move |c| Msg::Player(r.clone(), c.player(&r)));
-                            }
-                        }
-                    }
-                    PAction::Episodes(i) => {
-                        p.mode = PMode::Episodes(i);
-                        p.query.clear();
-                        // Start at the first unwatched episode.
-                        let watched = self.session.as_ref().and_then(|s| s.entry.clone().flatten()).and_then(|e| e.episodes).unwrap_or(0.0);
-                        p.sel = self
-                            .session
-                            .as_ref()
-                            .and_then(|s| s.player.as_ref())
-                            .and_then(|pl| pl.releases.get(i))
-                            .and_then(|r| r.episodes.iter().position(|e| e.number > watched))
-                            .unwrap_or(0);
-                    }
                 }
             }
             _ => {}
@@ -1256,15 +1100,13 @@ impl App {
             }
             return;
         }
-        let bottom_h = 1 + 1 + 3 + 1; // gap, session, input with rules, status
+        let bottom_h = 1 + 3 + 1; // gap, input with rules, status
         let transcript = Rect { height: area.height.saturating_sub(bottom_h), ..area };
         let y = transcript.y + transcript.height;
-        let session_area = Rect { y: y + 1, height: 1, ..area };
-        let input_area = Rect { y: y + 2, height: 3, ..area };
-        let status_area = Rect { y: y + 5, height: 1, ..area };
+        let input_area = Rect { y: y + 1, height: 3, ..area };
+        let status_area = Rect { y: y + 4, height: 1, ..area };
 
         self.draw_transcript(f, transcript);
-        self.draw_session(f, session_area);
         self.draw_input(f, input_area);
         self.draw_status(f, status_area);
 
@@ -1296,6 +1138,7 @@ impl App {
                 run[i] = (n + 1, first.or(Some(self.entries[i - 1].at)));
             }
         }
+        let mut action_before = false;
         for (i, e) in self.entries.iter_mut().enumerate() {
             let start = all.len();
             if folded[i] {
@@ -1307,12 +1150,23 @@ impl App {
             }
             let body = &e.cache.as_ref().unwrap().1;
             if e.cmd.is_empty() {
-                all.push(Line::raw(""));
-                all.extend(body.iter().cloned());
+                if e.action {
+                    // Page actions form a compact log: one line each, time on the right.
+                    let prev_action = i > 0 && run[i].0 == 1 && start > 0 && action_before;
+                    if !prev_action {
+                        all.push(Line::raw(""));
+                    }
+                    all.push(action_line(e, body, width, spinner));
+                } else {
+                    all.push(Line::raw(""));
+                    all.extend(body.iter().cloned());
+                }
+                action_before = e.action;
                 owner.resize(all.len(), None);
                 ranges.push((start, all.len()));
                 continue;
             }
+            action_before = false;
             shade[i] = zebra;
             zebra += 1;
             let collapsed = e.collapsed && !e.pending;
@@ -1374,35 +1228,6 @@ impl App {
                 }
             }
         }
-    }
-
-    fn draw_session(&self, f: &mut Frame, area: Rect) {
-        let line = match &self.session {
-            Some(s) => {
-                let mut spans = vec![Span::styled(" ● ", Style::new().fg(ACCENT)), Span::styled(s.title.clone(), ui::bold())];
-                let team = s.team.as_ref().and_then(|t| {
-                    s.player.as_ref().and_then(|p| p.releases.iter().find(|r| &r.id == t)).map(|r| r.team_names()).or(Some(t.clone()))
-                });
-                if let Some(t) = team {
-                    spans.push(Span::styled(format!("  ·  {t}"), ui::muted()));
-                }
-                if let Some(Some(e)) = &s.entry {
-                    let total = s.episodes.total.filter(|&t| t > 0).map(|t| t.to_string()).unwrap_or_else(|| "?".into());
-                    spans.push(Span::styled("  ·  ", ui::muted()));
-                    spans.push(Span::styled(
-                        format!("{} {}/{total}", list_status_label(&e.status), e.episodes.map(fmt_num).unwrap_or_else(|| "0".into())),
-                        Style::new().fg(GREEN),
-                    ));
-                }
-                if let Some(n) = s.last_ep {
-                    spans.push(Span::styled("  ·  ", ui::muted()));
-                    spans.push(Span::styled(format!("відкрито {} еп.", fmt_num(n)), Style::new().fg(YELLOW)));
-                }
-                Line::from(spans)
-            }
-            None => Line::styled(" ○ немає відкритого аніме", Style::new().fg(FAINT)),
-        };
-        f.render_widget(line, area);
     }
 
     fn draw_input(&self, f: &mut Frame, area: Rect) {
@@ -1471,21 +1296,12 @@ impl App {
             PMode::Actions => "Меню".to_string(),
             PMode::Recent => "Нещодавно переглянуті".to_string(),
             PMode::Search => "Пошук аніме".to_string(),
-            PMode::Releases => "Команда".to_string(),
-            PMode::Episodes(i) => self
-                .session
-                .as_ref()
-                .and_then(|s| s.player.as_ref())
-                .and_then(|pl| pl.releases.get(*i))
-                .map(|r| format!("Серії · {} · {}", r.team_names(), r.kind_label()))
-                .unwrap_or_default(),
         };
         let empty = match p.mode {
             PMode::Search if p.query.is_empty() => "почніть вводити назву",
             PMode::Recent if self.loading > 0 => "завантаження…",
             PMode::Recent => "ще нічого не дивились: /watch або /play",
             PMode::Search if p.query != p.searched || self.loading > 0 => "шукаю…",
-            PMode::Releases if self.session.as_ref().is_some_and(|s| s.player.is_none()) => "завантаження…",
             _ => "нічого немає",
         };
         let placeholder = if p.mode == PMode::Search { "назва українською, англійською чи оригінальною" } else { "фільтр" };
@@ -1544,6 +1360,20 @@ fn tone_style(t: Tone) -> Style {
         // Old saved transcripts may still carry these; show them neutral.
         Tone::Cyan | Tone::Magenta => s,
     }
+}
+
+fn action_line(e: &Entry, body: &[Line<'static>], width: u16, spinner: &str) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+    if e.pending {
+        spans.push(Span::styled(spinner.to_string(), Style::new().fg(ACCENT)));
+    } else if let Some(l) = body.first() {
+        spans.extend(l.spans.iter().cloned());
+    }
+    let time = e.at.with_timezone(&Local).format("%H:%M").to_string();
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
+    spans.push(Span::raw(" ".repeat((width as usize).saturating_sub(used + time.len() + 2))));
+    spans.push(Span::styled(time, Style::new().fg(FAINT)));
+    Line::from(spans)
 }
 
 /// Entry `i` is a command repeated right after by the same command.
@@ -1655,9 +1485,7 @@ fn wrap_line(l: &SLine, width: usize, indent: &str, out: &mut Vec<Line<'static>>
 /// Everything a command may read, copied at submit time.
 struct Snap {
     client: Client,
-    session: Option<Session>,
     anime_refs: Vec<String>,
-    release_refs: Vec<String>,
     recent: Vec<Recent>,
     tx: Sender<Msg>,
     id: u64,
@@ -1668,10 +1496,6 @@ impl Snap {
         let _ = self.tx.send(Msg::Append(self.id, lines));
     }
 
-    fn session(&self) -> Result<&Session> {
-        self.session.as_ref().context("немає відкритого аніме: /show <назва> або Ctrl+P → Пошук")
-    }
-
     fn need_key(&self) -> Result<()> {
         if !self.client.has_key() {
             bail!("потрібен вхід: /login");
@@ -1679,20 +1503,10 @@ impl Snap {
         Ok(())
     }
 
-    fn player(&self, out: &mut Outcome) -> Result<Player> {
-        let s = self.session()?;
-        if let Some(p) = &s.player {
-            return Ok(p.clone());
-        }
-        let p = self.client.player(&s.r)?;
-        out.player = Some((s.r.clone(), p.clone()));
-        Ok(p)
-    }
-
-    /// `#N` from the last list, the open session for an empty arg, or any ref/title.
+    /// `#N` from the last list, or any ref, link or title.
     fn anime(&self, arg: &str) -> Result<String> {
         if arg.is_empty() {
-            return Ok(self.session()?.r.clone());
+            bail!("яке аніме? /view <назва|#N>");
         }
         if let Some(n) = arg.strip_prefix('#') {
             let n: usize = n.parse().context("після # має бути номер")?;
@@ -1700,101 +1514,34 @@ impl Snap {
         }
         Ok(cli::resolve(&self.client, arg)?.0)
     }
-
-    fn release_filter(&self, arg: &str) -> Result<String> {
-        if let Some(n) = arg.strip_prefix('#') {
-            let n: usize = n.parse().context("після # має бути номер")?;
-            return self.release_refs.get(n.wrapping_sub(1)).cloned().with_context(|| format!("немає релізу #{n}: спершу /eps"));
-        }
-        Ok(arg.to_string())
-    }
-
-    fn save_entry(&self, out: &mut Outcome, patch: serde_json::Value) -> Result<()> {
-        self.need_key()?;
-        let s = self.session()?;
-        let mut patch = patch;
-        if matches!(s.entry, Some(None)) && patch.get("status").is_none() {
-            patch["status"] = json!("watching");
-        }
-        let e = self.client.save_entry(&s.r, &patch)?;
-        out.lines.push(SLine::of("✓ ", Tone::Green).push(view::entry_summary(&e, &s.episodes).text(), Tone::Plain));
-        out.entry = Some((s.r.clone(), Some(e)));
-        Ok(())
-    }
 }
 
-fn open_anime(snap: &Snap, r: &str, detail: Option<AnimeDetail>, page: bool) -> Result<Outcome> {
+/// Loads everything the watch page needs and opens it, picking up where the
+/// title was left: the same team and the episode after the last one.
+fn open_page(snap: &Snap, r: &str, detail: Option<AnimeDetail>) -> Result<Outcome> {
     let c = &snap.client;
     let d = match detail {
         Some(d) => d,
         None => c.anime(r)?,
     };
     let r = d.ids.mikai.map(|i| i.to_string()).unwrap_or_else(|| r.to_string());
+    let player = c.player(&r)?;
     let entry = if c.has_key() { Some(cli::entry_of(c, &r)?) } else { None };
-    let prev = snap.session.as_ref().filter(|s| s.r == r);
-    let keep_team = prev.and_then(|s| s.team.clone());
-    let last_ep = prev.and_then(|s| s.last_ep);
-    let (lines, player) = if page {
-        let player = match prev.and_then(|s| s.player.clone()) {
-            Some(p) => p,
-            None => c.player(&r)?,
-        };
-        (vec![SLine::of("Сторінка перегляду: ", Tone::Dim).push(d.titles.main(), Tone::Bold)], Some(player))
-    } else {
-        let mut lines = view::anime_card(&d, entry.as_ref().map(|e| e.as_ref()), true);
-        lines.push(dim("/view — сторінка перегляду · /eps #N — серії · /watch N — дивитись"));
-        (lines, prev.and_then(|s| s.player.clone()))
+    let rec = snap.recent.iter().find(|x| x.r == r);
+    let session = Session {
+        r: r.clone(),
+        title: d.titles.main().to_string(),
+        url: d.url(),
+        team: rec.and_then(|x| x.team.clone()),
+        last_ep: rec.map(|x| x.ep),
+        player: Some(player),
+        entry,
     };
-    Ok(Outcome {
-        lines,
-        page: page.then(|| d.clone()),
-        release_refs: Some(d.releases.iter().map(|x| x.id.clone()).collect()),
-        open: Some(Session {
-            r: r.clone(),
-            title: d.titles.main().to_string(),
-            url: d.url(),
-            episodes: d.episodes.clone(),
-            team: keep_team,
-            last_ep,
-            player,
-            entry,
-        }),
-        ..Default::default()
-    })
-}
-
-fn watch(snap: &Snap, n: f64, team: Option<String>, provider: Option<&str>, mpv: bool) -> Result<Outcome> {
-    let mut out = Outcome::default();
-    let s = snap.session()?;
-    let p = snap.player(&mut out)?;
-    if p.licensed {
-        bail!("аніме ліцензоване в Україні, джерел немає (/site)");
+    let mut line = SLine::of("→ ", Tone::Accent).push(d.titles.main(), Tone::Bold);
+    if let Some(x) = rec {
+        line = line.push(format!("   продовжити після {} еп.", fmt_num(x.ep)), Tone::Dim);
     }
-    let filter = |team: Option<String>| cli::Filter { team, kind: None, provider: provider.map(str::to_string), mpv };
-    let (rel, ep, src) = match cli::pick(&p.releases, n, &filter(team.clone())) {
-        Ok(found) => found,
-        // The remembered team may not have this episode yet: fall back to any.
-        Err(_) if team.is_some() && provider.is_none() => cli::pick(&p.releases, n, &filter(None))?,
-        Err(e) => return Err(e),
-    };
-    cli::play(&cli::media_title(&s.title, ep, rel), src, mpv)?;
-    out.lines.push(
-        SLine::of(if mpv { "▶ mpv  " } else { "▶ " }, Tone::Accent)
-            .push(format!("{} еп.", ep.label()), Tone::Bold)
-            .push(format!("  {} · {} · {}", rel.team_names(), rel.kind_label(), src.provider), Tone::Plain),
-    );
-    if !mpv {
-        out.lines.push(dim(src.embed_url.clone()));
-    }
-    out.team = Some((s.r.clone(), rel.id.clone()));
-    out.last_ep = Some((s.r.clone(), n));
-    if snap.client.has_key() {
-        let watched = s.entry.clone().flatten().and_then(|e| e.episodes).unwrap_or(0.0);
-        if n.floor() > watched {
-            out.lines.push(dim(format!("/ep {} — позначити переглянутою", fmt_num(n.floor()))));
-        }
-    }
-    Ok(out)
+    Ok(Outcome { lines: vec![line], page: Some((d, session)), ..Default::default() })
 }
 
 fn status_arg(arg: &str) -> Result<&'static str> {
@@ -1819,110 +1566,15 @@ fn exec(name: &str, args: &str, snap: &Snap) -> Result<Outcome> {
             out.lines = view::anime_rows(&page.items, true);
             out.lines.extend(view::page_footer(page.page, page.pages, page.total));
             if !page.items.is_empty() {
-                out.lines.push(dim("/show #N — відкрити"));
+                out.lines.push(dim("/view #N — відкрити"));
             }
             out.anime_refs = Some(page.items);
         }
-        "show" => {
-            if args.is_empty() {
-                bail!("яке аніме? /show <назва|id|#N>");
-            }
-            return open_anime(snap, &snap.anime(args)?, None, false);
-        }
+        "view" => return open_page(snap, &snap.anime(args)?, None),
         "random" => {
             let d = c.random()?;
             let r = d.ids.mikai.map(|i| i.to_string()).unwrap_or_default();
-            return open_anime(snap, &r, Some(d), false);
-        }
-        "eps" => {
-            let s = snap.session()?;
-            let p = snap.player(&mut out)?;
-            if p.licensed {
-                bail!("аніме ліцензоване в Україні, джерел немає (/site)");
-            }
-            if args.is_empty() {
-                out.lines = view::releases(&p.releases, true);
-                out.lines.push(dim("/eps #N — серії релізу"));
-                out.release_refs = Some(p.releases.iter().map(|r| r.id.clone()).collect());
-            } else {
-                let filter = snap.release_filter(args)?;
-                let rel = p.releases.iter().find(|r| r.matches(&filter)).with_context(|| format!("немає релізу «{args}»"))?;
-                let watched = s.entry.clone().flatten().and_then(|e| e.episodes).unwrap_or(0.0);
-                out.lines = view::episodes(rel, watched, None);
-                out.lines.push(dim("/watch N — дивитись"));
-                out.team = Some((s.r.clone(), rel.id.clone()));
-            }
-        }
-        "watch" | "play" => {
-            let mpv = name == "play" || words.iter().any(|w| *w == "--mpv" || *w == "-m");
-            let pos: Vec<&str> = words.iter().copied().filter(|w| !w.starts_with('-')).collect();
-            let n: f64 = pos
-                .first()
-                .with_context(|| format!("яку серію? /{name} <N> [команда] [плеєр]"))?
-                .replace(',', ".")
-                .parse()
-                .context("номер серії має бути числом")?;
-            let team = match pos.get(1) {
-                Some(t) => Some(snap.release_filter(t)?),
-                None => snap.session()?.team.clone(),
-            };
-            return watch(snap, n, team, pos.get(2).copied(), mpv);
-        }
-        "next" => {
-            let s = snap.session()?;
-            let watched = s.entry.clone().flatten().and_then(|e| e.episodes).unwrap_or(0.0);
-            let n = s.last_ep.unwrap_or(0.0).max(watched).floor() + 1.0;
-            let mpv = words.iter().any(|w| *w == "--mpv" || *w == "-m");
-            return watch(snap, n, s.team.clone(), None, mpv);
-        }
-        "view" | "resume" => {
-            let r = if args.is_empty() && name == "resume" {
-                snap.recent.first().map(|x| x.r.clone()).context("ще нічого не дивились")?
-            } else {
-                snap.anime(args)?
-            };
-            // Both pick up where the title was left: team and next episode.
-            let mut out = open_anime(snap, &r, None, true)?;
-            if let (Some(s), Some(rec)) = (out.open.as_mut(), snap.recent.iter().find(|x| x.r == r)) {
-                s.last_ep = Some(s.last_ep.unwrap_or(0.0).max(rec.ep));
-                if s.team.is_none() {
-                    s.team = rec.team.clone();
-                }
-                out.lines = vec![
-                    SLine::of("Продовжити: ", Tone::Dim)
-                        .push(s.title.clone(), Tone::Bold)
-                        .push(format!("  після {} еп.", fmt_num(rec.ep)), Tone::Dim),
-                ];
-            }
-            return Ok(out);
-        }
-        "ep" => {
-            let n: i64 = args.parse().context("/ep <номер серії>")?;
-            snap.save_entry(&mut out, json!({ "episodes": n }))?;
-        }
-        "status" => {
-            let st = status_arg(args)?;
-            snap.save_entry(&mut out, json!({ "status": st }))?;
-        }
-        "score" => {
-            let v: f64 = args.replace(',', ".").parse().context("/score <0.5–10>, 0 — прибрати")?;
-            snap.save_entry(&mut out, json!({ "score": if v == 0.0 { serde_json::Value::Null } else { json!(v) } }))?;
-        }
-        "rm" => {
-            snap.need_key()?;
-            let s = snap.session()?;
-            c.delete_entry(&s.r)?;
-            out.lines.push(plain("Прибрано зі списків"));
-            out.entry = Some((s.r.clone(), None));
-        }
-        "site" => {
-            let s = snap.session()?;
-            let url = match &s.url {
-                Some(u) => u.clone(),
-                None => c.anime(&s.r)?.url().context("у аніме немає сторінки")?,
-            };
-            open::that_detached(&url).context("не вдалося відкрити браузер")?;
-            out.lines.push(dim(url));
+            return open_page(snap, &r, Some(d));
         }
         "schedule" => {
             let day = (!args.is_empty()).then(|| view::weekday_key(args));
@@ -1944,30 +1596,6 @@ fn exec(name: &str, args: &str, snap: &Snap) -> Result<Outcome> {
             out.lines.extend(view::page_footer(p.page, p.pages, p.total));
             out.anime_refs = Some(p.items.into_iter().map(|e| e.anime).collect());
         }
-        "history" => {
-            snap.need_key()?;
-            let p = c.history(1, 30)?;
-            out.lines = view::history(&p.items, true);
-            out.anime_refs = Some(p.items.iter().map(view::anime_of).collect());
-        }
-        "notif" => {
-            snap.need_key()?;
-            if args == "read" {
-                c.mark_all_read()?;
-                out.lines.push(plain("Усі сповіщення прочитано"));
-            } else {
-                let filter = if args == "all" { "all" } else { "unread" };
-                out.lines = view::notifications(&c.notifications(filter, 1, 30)?.items);
-            }
-        }
-        "translit" => {
-            if args.is_empty() {
-                bail!("/translit <текст>");
-            }
-            let r = c.translit(args, None)?;
-            out.lines.push(plain(r.get("text").and_then(|v| v.as_str()).map(str::to_string).unwrap_or_else(|| r.to_string())));
-        }
-        "whoami" => out.lines = view::me(&c.me()?),
         "login" => {
             let mut config = Config::load()?;
             let mut client = c.clone();

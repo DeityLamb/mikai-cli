@@ -77,10 +77,6 @@ impl AnimeShort {
     pub fn reference(&self) -> Option<String> {
         self.ids.mikai.map(|id| id.to_string())
     }
-
-    pub fn url(&self) -> Option<String> {
-        anime_url(&self.ids)
-    }
 }
 
 pub fn anime_url(ids: &Ids) -> Option<String> {
