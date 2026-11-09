@@ -1427,7 +1427,7 @@ fn draw_completions(f: &mut Frame, above: Rect, comps: &[&Spec], sel: usize) {
         .iter()
         .map(|c| ui::Item::new(format!("/{:<10} {}", c.name, c.args), c.help))
         .collect();
-    ui::rows(f, Rect { x: rect.x + 1, y: rect.y, width: rect.width - 2, height: h }, &items, sel, ui::OVERLAY);
+    ui::rows(f, Rect { x: rect.x + 1, y: rect.y, width: rect.width - 2, height: h }, &items, sel, ui::OVERLAY, true);
     let hints = ui::hints(&[("Tab", "доповнити"), ("⏎", "виконати")]);
     f.render_widget(Line::from(hints), Rect { x: rect.x + 2, y: rect.y + h, width: rect.width - 2, height: 1 });
 }

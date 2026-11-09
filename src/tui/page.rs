@@ -29,9 +29,8 @@ const BUTTONS: [Btn; 5] = [Btn::Mpv, Btn::Browser, Btn::Watched, Btn::Status, Bt
 /// Pickers shown over the page.
 #[derive(Clone, PartialEq, Eq)]
 pub(super) enum Modal {
-    Kind,
-    Team(String),
-    Player,
+    /// Track | team | player in three columns; the number is the active column.
+    Source(usize),
     Related,
 }
 
@@ -44,8 +43,10 @@ pub(super) enum Hit {
     Button(Btn),
     /// Open a related title.
     Related(String),
-    /// Row `n` of the open modal.
+    /// Row `n` of the open list modal.
     Item(usize),
+    /// Row `n` of column `col` in the source modal.
+    Cell(usize, usize),
     /// Anywhere on the dimmed page while a modal is open.
     Outside,
     /// The modal panel itself, between rows.
@@ -307,136 +308,35 @@ impl App {
         pl.releases.iter().enumerate().filter(|(_, r)| r.kind == kind).map(|(i, _)| i).collect()
     }
 
+    /// Players the chosen team uses, in order of first appearance.
+    fn players(&self) -> Vec<String> {
+        let Some((p, _, Some(pl))) = self.page_parts() else { return vec![] };
+        let mut out: Vec<String> = vec![];
+        for e in pl.releases.get(p.rel).map(|r| r.episodes.as_slice()).unwrap_or(&[]) {
+            for s in &e.sources {
+                if !out.contains(&s.provider) {
+                    out.push(s.provider.clone());
+                }
+            }
+        }
+        out
+    }
+
+    fn set_kind(&mut self, kind: &str) {
+        let Some((p, s, Some(pl))) = self.page_parts() else { return };
+        if p.kind == kind {
+            return;
+        }
+        let remembered = s.team.as_ref().and_then(|t| pl.releases.iter().position(|r| &r.id == t && r.kind == kind));
+        if let Some(i) = remembered.or_else(|| best_release(pl, Some(kind), p.mpv)) {
+            self.select_release(i);
+        }
+    }
+
     fn open_modal(&mut self, m: Modal) {
-        let Some((page, _, Some(pl))) = self.page_parts() else { return };
-        let (m, sel) = match m {
-            // With a single track, go straight to its teams.
-            Modal::Kind if self.kinds().len() == 1 => {
-                let k = self.kinds().remove(0);
-                let sel = self.teams_of(&k).iter().position(|&i| i == page.rel).unwrap_or(0);
-                (Modal::Team(k), sel)
-            }
-            Modal::Kind => (Modal::Kind, self.kinds().iter().position(|k| *k == page.kind).unwrap_or(0)),
-            Modal::Team(k) => {
-                let teams = self.teams_of(&k);
-                let sel = teams
-                    .iter()
-                    .position(|&i| i == page.rel)
-                    .or_else(|| best_release(pl, Some(&k), page.mpv).and_then(|b| teams.iter().position(|&i| i == b)))
-                    .unwrap_or(0);
-                (Modal::Team(k), sel)
-            }
-            Modal::Related => (Modal::Related, 0),
-            Modal::Player => {
-                let cur = self.current_source().map(|s| s.provider.clone());
-                let sel = self
-                    .current()
-                    .and_then(|(_, e)| e.sources.iter().position(|s| Some(&s.provider) == cur.as_ref()))
-                    .unwrap_or(0);
-                (Modal::Player, sel)
-            }
-        };
         if let Some(p) = &mut self.page {
             p.modal = Some(m);
-            p.modal_sel = sel;
-        }
-    }
-
-    fn modal_items(&self) -> Vec<ui::Item> {
-        let Some((page, session, Some(pl))) = self.page_parts() else { return vec![] };
-        let numbered = |i: usize, mut it: ui::Item| {
-            it.key = (i < 9).then(|| (i + 1).to_string());
-            it
-        };
-        match &page.modal {
-            None => vec![],
-            Some(Modal::Kind) => self
-                .kinds()
-                .iter()
-                .enumerate()
-                .map(|(i, k)| {
-                    let n = self.teams_of(k).len();
-                    numbered(i, ui::Item::new(kind_title(k), format!("{n} {}", teams_word(n))))
-                })
-                .collect(),
-            Some(Modal::Team(k)) => self
-                .teams_of(k)
-                .iter()
-                .enumerate()
-                .map(|(n, &i)| {
-                    let r = &pl.releases[i];
-                    let mut meta = vec![r.last_episode.map(|e| format!("{} еп.", fmt_num(e))).unwrap_or_else(|| "–".into())];
-                    if let Some(d) = r.updated_at.as_deref().and_then(view::parse_time) {
-                        meta.push(d.with_timezone(&Local).format("%d.%m.%y").to_string());
-                    }
-                    if page.mpv && playable(r) {
-                        meta.push("mpv".into());
-                    }
-                    let mut it = ui::Item::new(r.team_names(), meta.join(" · "));
-                    if session.team.as_deref() == Some(r.id.as_str()) {
-                        it.tag = Some(("● дивились".into(), YELLOW));
-                    }
-                    numbered(n, it)
-                })
-                .collect(),
-            Some(Modal::Related) => self
-                .relations()
-                .into_iter()
-                .enumerate()
-                .map(|(i, r)| {
-                    let year = r.anime.year.map(|y| y.to_string());
-                    let meta = [Some(r.label().to_string()), r.anime.format.as_deref().map(str::to_uppercase), year]
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>()
-                        .join(" · ");
-                    numbered(i, ui::Item::new(r.anime.titles.main(), meta))
-                })
-                .collect(),
-            Some(Modal::Player) => self
-                .current()
-                .map(|(_, e)| {
-                    e.sources
-                        .iter()
-                        .enumerate()
-                        .map(|(i, s)| {
-                            let meta = if play::supports_mpv(&s.provider) { "браузер і mpv" } else { "лише браузер" };
-                            numbered(i, ui::Item::new(s.provider.clone(), meta))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default(),
-        }
-    }
-
-    fn modal_pick(&mut self, i: usize) {
-        let Some(m) = self.page.as_ref().and_then(|p| p.modal.clone()) else { return };
-        match m {
-            Modal::Kind => {
-                if let Some(k) = self.kinds().get(i).cloned() {
-                    self.open_modal(Modal::Team(k));
-                }
-            }
-            Modal::Team(k) => {
-                if let Some(&rel) = self.teams_of(&k).get(i) {
-                    self.select_release(rel);
-                }
-                self.close_modal();
-            }
-            Modal::Related => {
-                let r = self.relations().get(i).and_then(|r| r.anime.reference());
-                self.close_modal();
-                if let Some(r) = r {
-                    self.open_related(r);
-                }
-            }
-            Modal::Player => {
-                let name = self.current().and_then(|(_, e)| e.sources.get(i)).map(|s| s.provider.clone());
-                if let (Some(p), Some(name)) = (&mut self.page, name) {
-                    p.provider = Some(name);
-                }
-                self.close_modal();
-            }
+            p.modal_sel = 0;
         }
     }
 
@@ -446,34 +346,116 @@ impl App {
         }
     }
 
+    /// Rows of the track, team and player columns, with the chosen row of each.
+    fn source_columns(&self) -> [(Vec<ui::Item>, usize); 3] {
+        let empty = || (vec![], 0);
+        let Some((page, session, Some(pl))) = self.page_parts() else { return [empty(), empty(), empty()] };
+        let kinds = self.kinds();
+        let tracks = kinds
+            .iter()
+            .map(|k| {
+                let n = self.teams_of(k).len();
+                ui::Item::new(kind_title(k), format!("{n} {}", teams_word(n)))
+            })
+            .collect();
+        let track_sel = kinds.iter().position(|k| *k == page.kind).unwrap_or(0);
+
+        let ids = self.teams_of(&page.kind);
+        let teams = ids
+            .iter()
+            .map(|&i| {
+                let r = &pl.releases[i];
+                let mut meta = r.last_episode.map(|e| format!("{} еп.", fmt_num(e))).unwrap_or_else(|| "–".into());
+                if page.mpv && playable(r) {
+                    meta.push_str(" · mpv");
+                }
+                let mut it = ui::Item::new(r.team_names(), meta);
+                if session.team.as_deref() == Some(r.id.as_str()) {
+                    it.tag = Some(("●".into(), YELLOW));
+                }
+                it
+            })
+            .collect();
+        let team_sel = ids.iter().position(|&i| i == page.rel).unwrap_or(0);
+
+        let names = self.players();
+        let cur = self.current_source().map(|s| s.provider.clone());
+        let players = names
+            .iter()
+            .map(|n| ui::Item::new(n.clone(), if play::supports_mpv(n) { "mpv" } else { "" }))
+            .collect();
+        let player_sel = names.iter().position(|n| Some(n) == cur.as_ref()).unwrap_or(0);
+        [(tracks, track_sel), (teams, team_sel), (players, player_sel)]
+    }
+
+    /// Chooses row `i` of column `col`; the page follows right away.
+    fn source_pick(&mut self, col: usize, i: usize) {
+        match col {
+            0 => {
+                if let Some(k) = self.kinds().get(i).cloned() {
+                    self.set_kind(&k);
+                }
+            }
+            1 => {
+                let kind = self.page.as_ref().map(|p| p.kind.clone()).unwrap_or_default();
+                if let Some(&rel) = self.teams_of(&kind).get(i) {
+                    self.select_release(rel);
+                }
+            }
+            _ => {
+                if let Some(name) = self.players().get(i).cloned() {
+                    if let Some(p) = &mut self.page {
+                        p.provider = Some(name);
+                    }
+                }
+            }
+        }
+        if let Some(p) = &mut self.page {
+            p.modal = Some(Modal::Source(col.min(2)));
+        }
+    }
+
+    fn related_pick(&mut self, i: usize) {
+        let r = self.relations().get(i).and_then(|r| r.anime.reference());
+        self.close_modal();
+        if let Some(r) = r {
+            self.open_related(r);
+        }
+    }
+
     fn modal_key(&mut self, k: KeyEvent) {
-        let n = self.modal_items().len();
-        let Some(p) = &mut self.page else { return };
-        match k.code {
-            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
-                // From teams, step back to the track choice if there is one.
-                let back = matches!(p.modal, Some(Modal::Team(_))) && k.code != KeyCode::Esc;
-                if back && self.kinds().len() > 1 {
-                    self.open_modal(Modal::Kind);
-                } else {
-                    self.close_modal();
+        let Some(m) = self.page.as_ref().and_then(|p| p.modal.clone()) else { return };
+        match m {
+            Modal::Related => {
+                let n = self.relations().len();
+                let Some(p) = &mut self.page else { return };
+                match k.code {
+                    KeyCode::Esc | KeyCode::Backspace => self.close_modal(),
+                    KeyCode::Up | KeyCode::Char('k') => p.modal_sel = p.modal_sel.saturating_sub(1),
+                    KeyCode::Down | KeyCode::Char('j') => p.modal_sel = (p.modal_sel + 1).min(n.saturating_sub(1)),
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        let i = p.modal_sel;
+                        self.related_pick(i);
+                    }
+                    KeyCode::Char(c @ '1'..='9') if (c as usize - '1' as usize) < n => self.related_pick(c as usize - '1' as usize),
+                    _ => {}
                 }
             }
-            KeyCode::Up | KeyCode::Char('k') => p.modal_sel = p.modal_sel.saturating_sub(1),
-            KeyCode::Down | KeyCode::Char('j') => p.modal_sel = (p.modal_sel + 1).min(n.saturating_sub(1)),
-            KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Char('l') => {
-                let i = p.modal_sel;
-                self.modal_pick(i);
-            }
-            KeyCode::Char(c @ '1'..='9') => {
-                let i = c as usize - '1' as usize;
-                if i < n {
-                    self.modal_pick(i);
+            Modal::Source(col) => {
+                let cols = self.source_columns();
+                let (len, sel) = (cols[col].0.len(), cols[col].1);
+                match k.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Backspace => self.close_modal(),
+                    KeyCode::Left | KeyCode::Char('h') | KeyCode::BackTab => self.open_modal(Modal::Source(col.saturating_sub(1))),
+                    KeyCode::Right | KeyCode::Char('l') | KeyCode::Tab => self.open_modal(Modal::Source((col + 1).min(2))),
+                    KeyCode::Up | KeyCode::Char('k') if sel > 0 => self.source_pick(col, sel - 1),
+                    KeyCode::Down | KeyCode::Char('j') if sel + 1 < len => self.source_pick(col, sel + 1),
+                    KeyCode::Char(c @ '1'..='9') if (c as usize - '1' as usize) < len => self.source_pick(col, c as usize - '1' as usize),
+                    KeyCode::Char('c') => self.open_modal(Modal::Source(1)),
+                    KeyCode::Char('p') => self.open_modal(Modal::Source(2)),
+                    _ => {}
                 }
             }
-            KeyCode::Char('c') => self.open_modal(Modal::Kind),
-            KeyCode::Char('p') => self.open_modal(Modal::Player),
-            _ => {}
         }
     }
 
@@ -500,8 +482,8 @@ impl App {
             KeyCode::Tab | KeyCode::BackTab => {
                 p.focus = if p.focus == Focus::Episodes { Focus::Buttons } else { Focus::Episodes };
             }
-            KeyCode::Char('c') => self.open_modal(Modal::Kind),
-            KeyCode::Char('p') => self.open_modal(Modal::Player),
+            KeyCode::Char('c') => self.open_modal(Modal::Source(1)),
+            KeyCode::Char('p') => self.open_modal(Modal::Source(2)),
             KeyCode::Char('m') => self.page_action(Btn::Mpv),
             KeyCode::Char('b') => self.page_action(Btn::Browser),
             KeyCode::Char('w') => self.page_action(Btn::Watched),
@@ -549,7 +531,8 @@ impl App {
             Hit::Related(r) => self.open_related(r),
             Hit::Outside => self.close_modal(),
             Hit::Inside => {}
-            Hit::Item(i) => self.modal_pick(i),
+            Hit::Item(i) => self.related_pick(i),
+            Hit::Cell(col, i) => self.source_pick(col, i),
             Hit::Open(m) => self.open_modal(m),
             Hit::Desc => {
                 if let Some(p) = &mut self.page {
@@ -797,16 +780,18 @@ impl App {
         y + rows + 5
     }
 
-    /// Two panels: chosen team and chosen player, each opening its picker.
+    /// One panel: the chosen team and player; `c` / `p` open the picker.
     fn draw_choice(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
         let (page, _, Some(pl)) = self.page_parts().unwrap() else { return y };
-        let gap = 4;
-        let team_w = (w - gap) / 2;
-        let player_x = x + team_w + gap;
-        let player_w = w - team_w - gap;
+        let panel = Rect { x: x - 1, y, width: w + 2, height: 4 };
+        ui::fill(f, panel, SURFACE);
+        let ix = x + 1;
+        let iw = w.saturating_sub(2);
+        let keys = vec![ui::key("c"), Span::styled(" команда   ", ui::muted()), ui::key("p"), Span::styled(" плеєр", ui::muted())];
+        ui::section(f, Rect { x: ix, y: y + 1, width: iw, height: 1 }, "Команда і плеєр", "", keys, false);
 
-        let team = pl.releases.get(page.rel);
-        let team_value = Line::from(match team {
+        let half = iw / 2;
+        let team = match pl.releases.get(page.rel) {
             Some(r) => vec![
                 Span::styled(r.team_names(), ui::bold()),
                 Span::styled(
@@ -815,29 +800,20 @@ impl App {
                 ),
             ],
             None => vec![Span::styled("—", ui::muted())],
-        });
-        let src = self.current_source();
-        let player_value = Line::from(match src {
+        };
+        let player = match self.current_source() {
             Some(s) => vec![
                 Span::styled(s.provider.clone(), ui::bold()),
-                Span::styled(
-                    if play::supports_mpv(&s.provider) { "   браузер і mpv" } else { "   лише браузер" },
-                    ui::muted(),
-                ),
+                Span::styled(if play::supports_mpv(&s.provider) { "   браузер і mpv" } else { "   лише браузер" }, ui::muted()),
             ],
             None => vec![Span::styled("—", ui::muted())],
-        });
-
-        for (px, pw, title, key, value, modal) in [
-            (x, team_w, "Команда", "c", team_value, Modal::Kind),
-            (player_x, player_w, "Плеєр", "p", player_value, Modal::Player),
-        ] {
-            let panel = Rect { x: px - 1, y, width: pw + 2, height: 4 };
-            ui::fill(f, panel, SURFACE);
-            ui::section(f, Rect { x: px + 1, y: y + 1, width: pw - 2, height: 1 }, title, "", vec![ui::key(key)], false);
-            f.render_widget(value, Rect { x: px + 1, y: y + 2, width: pw - 2, height: 1 });
-            hits.push((panel, Hit::Open(modal)));
-        }
+        };
+        let left = Rect { x: ix, y: y + 2, width: half, height: 1 };
+        let right = Rect { x: ix + half, y: y + 2, width: iw - half, height: 1 };
+        f.render_widget(Line::from(team), left);
+        f.render_widget(Line::from(player), right);
+        hits.push((panel, Hit::Open(Modal::Source(1))));
+        hits.push((Rect { height: 2, ..right }, Hit::Open(Modal::Source(2))));
         y + 5
     }
 
@@ -961,33 +937,78 @@ impl App {
     /// Team or player picker over the dimmed page. Returns the click map.
     fn draw_modal(&self, f: &mut Frame, area: Rect) -> Vec<(Rect, Hit)> {
         let Some(page) = &self.page else { return vec![] };
-        let Some(m) = &page.modal else { return vec![] };
+        let Some(m) = page.modal.clone() else { return vec![] };
         f.buffer_mut().set_style(area, Style::new().fg(FAINT));
-        let two_steps = self.kinds().len() > 1;
-        let (title, aside) = match m {
-            Modal::Kind => ("Трек".to_string(), if two_steps { "крок 1/2" } else { "" }),
-            Modal::Team(k) => (format!("Команда · {}", kind_title(k)), if two_steps { "крок 2/2" } else { "" }),
-            Modal::Player => (format!("Плеєр · {} еп.", self.current().map(|(_, e)| e.label()).unwrap_or_default()), ""),
-            Modal::Related => ("Сезони та пов'язані".to_string(), ""),
-        };
-        let mut footer = vec![("↑↓", "вибір"), ("⏎", "обрати")];
-        if matches!(m, Modal::Team(_)) && two_steps {
-            footer.push(("←", "трек"));
+        match m {
+            Modal::Related => {
+                let items = self
+                    .relations()
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, r)| {
+                        let meta = [Some(r.label().to_string()), r.anime.format.as_deref().map(str::to_uppercase), r.anime.year.map(|y| y.to_string())]
+                            .into_iter()
+                            .flatten()
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        let mut it = ui::Item::new(r.anime.titles.main(), meta);
+                        it.key = (i < 9).then(|| (i + 1).to_string());
+                        it
+                    })
+                    .collect();
+                let overlay = ui::Overlay {
+                    title: "Сезони та пов'язані".into(),
+                    aside: String::new(),
+                    filter: None,
+                    items,
+                    sel: page.modal_sel,
+                    empty: "нічого немає".into(),
+                    footer: vec![("↑↓", "вибір"), ("⏎", "відкрити"), ("Esc", "закрити")],
+                    width: 72,
+                };
+                let layout = overlay.draw(f, area);
+                let mut hits = vec![(area, Hit::Outside), (layout.rect, Hit::Inside)];
+                hits.extend(layout.rows.into_iter().map(|(r, i)| (r, Hit::Item(i))));
+                hits
+            }
+            Modal::Source(active) => self.draw_source_modal(f, area, active),
         }
-        footer.push(("Esc", "закрити"));
-        let overlay = ui::Overlay {
-            title,
-            aside: aside.into(),
-            filter: None,
-            items: self.modal_items(),
-            sel: page.modal_sel,
-            empty: "нічого немає".into(),
-            footer,
-            width: 64,
-        };
-        let layout = overlay.draw(f, area);
-        let mut hits = vec![(area, Hit::Outside), (layout.rect, Hit::Inside)];
-        hits.extend(layout.rows.into_iter().map(|(r, i)| (r, Hit::Item(i))));
+    }
+
+    /// Track | team | player side by side. Moving in a column applies at once.
+    fn draw_source_modal(&self, f: &mut Frame, area: Rect, active: usize) -> Vec<(Rect, Hit)> {
+        let cols = self.source_columns();
+        let w = 100.min(area.width.saturating_sub(4));
+        let rows_h = cols.iter().map(|(items, _)| items.len()).max().unwrap_or(1).clamp(1, area.height.saturating_sub(12) as usize) as u16;
+        let h = rows_h + 8;
+        let rect = Rect { x: area.x + (area.width - w) / 2, y: area.y + area.height.saturating_sub(h) / 3, width: w, height: h };
+        f.render_widget(Clear, rect);
+        ui::fill(f, rect, ui::OVERLAY);
+        let ix = rect.x + 2;
+        let iw = rect.width.saturating_sub(4);
+        let ep = self.current().map(|(_, e)| format!("{} еп.", e.label())).unwrap_or_default();
+        ui::section(f, Rect { x: ix, y: rect.y + 1, width: iw, height: 1 }, "Команда і плеєр", "", vec![Span::styled(ep, ui::muted())], true);
+
+        let gap = 3;
+        let track_w = 22;
+        let player_w = 22;
+        let team_w = iw.saturating_sub(track_w + player_w + 2 * gap);
+        let xs = [(ix, track_w), (ix + track_w + gap, team_w), (ix + track_w + gap + team_w + gap, player_w)];
+        let titles = ["Трек", "Команда", "Плеєр"];
+        let mut hits = vec![(area, Hit::Outside), (rect, Hit::Inside)];
+        for (c, ((cx, cw), (items, sel))) in xs.iter().zip(cols.iter()).enumerate() {
+            let on = c == active;
+            ui::section(f, Rect { x: *cx, y: rect.y + 3, width: *cw, height: 1 }, titles[c], "", vec![], on);
+            if on {
+                ui::focus_bar(f, cx - 2, rect.y + 3, rows_h + 2);
+            }
+            let list = Rect { x: cx - 1, y: rect.y + 5, width: cw + 1, height: rows_h };
+            for (r, i) in ui::rows(f, list, items, *sel, ui::OVERLAY, on) {
+                hits.push((r, Hit::Cell(c, i)));
+            }
+        }
+        let footer = ui::hints(&[("←→", "стовпчик"), ("↑↓", "вибір"), ("⏎", "готово")]);
+        f.render_widget(Line::from(footer), Rect { x: ix, y: rect.y + h - 2, width: iw, height: 1 });
         hits
     }
 }

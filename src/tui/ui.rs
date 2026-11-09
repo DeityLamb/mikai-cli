@@ -117,7 +117,8 @@ impl Item {
 
 /// Draws list rows into `rect`, scrolled so `sel` is visible. Returns the
 /// rectangle of every drawn row with its item index.
-pub fn rows(f: &mut Frame, rect: Rect, items: &[Item], sel: usize, bg: Color) -> Vec<(Rect, usize)> {
+/// `active` lists highlight the chosen row strongly, others only mark it.
+pub fn rows(f: &mut Frame, rect: Rect, items: &[Item], sel: usize, bg: Color, active: bool) -> Vec<(Rect, usize)> {
     let h = rect.height as usize;
     let start = if sel >= h { sel + 1 - h } else { 0 };
     let has_keys = items.iter().any(|i| i.key.is_some());
@@ -127,7 +128,11 @@ pub fn rows(f: &mut Frame, rect: Rect, items: &[Item], sel: usize, bg: Color) ->
     let mut hits = vec![];
     for (row, (i, it)) in items.iter().enumerate().skip(start).take(h).enumerate() {
         let selected = i == sel;
-        let base = Style::new().bg(if selected { SELECT } else { bg });
+        let base = Style::new().bg(match (selected, active) {
+            (true, true) => SELECT,
+            (true, false) => KEY_BG,
+            _ => bg,
+        });
         let r = Rect { x: rect.x, y: rect.y + row as u16, width: rect.width, height: 1 };
         // Two columns of air between the label and the meta.
         let label_w = (rect.width as usize).saturating_sub(key_w + 1 + 2 + meta_w + tag_w + 2);
@@ -207,7 +212,7 @@ impl Overlay<'_> {
             f.render_widget(Span::styled(self.empty.clone(), muted()), Rect { x: ix, y, width: iw, height: 1 });
             vec![]
         } else {
-            rows(f, list, &self.items, self.sel, OVERLAY)
+            rows(f, list, &self.items, self.sel, OVERLAY, true)
         };
         y += list_h + 1;
         f.render_widget(Line::from(hints(&self.footer)), Rect { x: ix, y, width: iw, height: 1 });
