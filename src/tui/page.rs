@@ -748,17 +748,19 @@ impl App {
         y + h + 3
     }
 
-    /// One row: "Команда і плеєр" and "Пов'язані аніме" side by side, both
+    /// One row: "Пов'язані аніме" and "Команда і плеєр" side by side, both
     /// with a fixed height. Without related titles the first takes the row.
     fn draw_middle(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
         const BODY: u16 = 3;
         let has_related = !self.relations().is_empty();
         let gap = 4;
-        let left_w = if has_related { (w - gap) / 2 } else { w };
-        self.draw_choice(f, Rect { x, y, width: left_w, height: BODY }, hits);
         if has_related {
-            let rx = x + left_w + gap;
-            self.draw_related(f, Rect { x: rx, y, width: w - left_w - gap, height: BODY }, hits);
+            // Related first, the team and player next to the episodes they drive.
+            let left_w = (w - gap) / 2;
+            self.draw_related(f, Rect { x, y, width: left_w, height: BODY }, hits);
+            self.draw_choice(f, Rect { x: x + left_w + gap, y, width: w - left_w - gap, height: BODY }, hits);
+        } else {
+            self.draw_choice(f, Rect { x, y, width: w, height: BODY }, hits);
         }
         y + BODY + 5
     }
