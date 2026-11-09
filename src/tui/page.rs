@@ -469,8 +469,6 @@ impl App {
                     KeyCode::Up | KeyCode::Char('k') if sel > 0 => self.source_pick(col, sel - 1),
                     KeyCode::Down | KeyCode::Char('j') if sel + 1 < len => self.source_pick(col, sel + 1),
                     KeyCode::Char(c @ '1'..='9') if (c as usize - '1' as usize) < len => self.source_pick(col, c as usize - '1' as usize),
-                    KeyCode::Char('c') => self.open_modal(Modal::Source(1)),
-                    KeyCode::Char('p') => self.open_modal(Modal::Source(2)),
                     _ => {}
                 }
             }
@@ -501,7 +499,6 @@ impl App {
                 p.focus = if p.focus == Focus::Episodes { Focus::Buttons } else { Focus::Episodes };
             }
             KeyCode::Char('c') => self.open_modal(Modal::Source(1)),
-            KeyCode::Char('p') => self.open_modal(Modal::Source(2)),
             KeyCode::Char('m') => self.page_action(Btn::Mpv),
             KeyCode::Char('b') => self.page_action(Btn::Browser),
             KeyCode::Char('w') => self.page_action(Btn::Watched),
@@ -621,8 +618,7 @@ impl App {
             return;
         }
 
-        y = self.draw_related(f, x, y, w, &mut hits);
-        y = self.draw_choice(f, x, y, w, &mut hits);
+        y = self.draw_middle(f, x, y, w, &mut hits);
 
         let buttons_h = 4;
         let (rows, cols) = self.episode_rows(w);
@@ -752,63 +748,33 @@ impl App {
         y + h + 3
     }
 
-    /// The first few related titles as a list; `r` opens all of them.
-    fn draw_related(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
-        const SHOWN: usize = 3;
-        let rels = self.relations();
-        if rels.is_empty() {
-            return y;
+    /// One row: "Команда і плеєр" and "Пов'язані аніме" side by side, both
+    /// with a fixed height. Without related titles the first takes the row.
+    fn draw_middle(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
+        const BODY: u16 = 3;
+        let has_related = !self.relations().is_empty();
+        let gap = 4;
+        let left_w = if has_related { (w - gap) / 2 } else { w };
+        self.draw_choice(f, Rect { x, y, width: left_w, height: BODY }, hits);
+        if has_related {
+            let rx = x + left_w + gap;
+            self.draw_related(f, Rect { x: rx, y, width: w - left_w - gap, height: BODY }, hits);
         }
-        let rows = rels.len().min(SHOWN) as u16 + u16::from(rels.len() > SHOWN);
-        let panel = Rect { x: x - 1, y, width: w + 2, height: rows + 4 };
-        ui::fill(f, panel, SURFACE);
-        let ix = x + 1;
-        let iw = w.saturating_sub(2);
-
-        let all = ui::hint("r", &format!("усі · {}", rels.len()));
-        let aw = ui::width(&all);
-        hits.push((Rect { x: ix + iw - aw, y: y + 1, width: aw, height: 1 }, Hit::Open(Modal::Related)));
-        ui::section(f, Rect { x: ix, y: y + 1, width: iw, height: 1 }, "Сезони та пов'язані", "", all, false);
-
-        for (i, r) in rels.iter().take(SHOWN).enumerate() {
-            let row = Rect { x: ix, y: y + 3 + i as u16, width: iw, height: 1 };
-            let meta = [Some(r.label().to_string()), r.anime.format.as_deref().map(str::to_uppercase), r.anime.year.map(|y| y.to_string())]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
-                .join(" · ");
-            let title_w = (iw as usize).saturating_sub(meta.width() + 3);
-            f.render_widget(
-                Line::from(vec![
-                    Span::styled(crate::style::pad(r.anime.titles.main(), title_w), ui::bold()),
-                    Span::raw("   "),
-                    Span::styled(meta, ui::muted()),
-                ]),
-                row,
-            );
-            if let Some(id) = r.anime.reference() {
-                hits.push((row, Hit::Related(id)));
-            }
-        }
-        if rels.len() > SHOWN {
-            let row = Rect { x: ix, y: y + 3 + SHOWN as u16, width: iw, height: 1 };
-            f.render_widget(Line::styled(format!("… ще {}", rels.len() - SHOWN), ui::muted()), row);
-            hits.push((row, Hit::Open(Modal::Related)));
-        }
-        y + rows + 5
+        y + BODY + 5
     }
 
-    /// One panel: the chosen team and player; `c` / `p` open the picker.
-    fn draw_choice(&self, f: &mut Frame, x: u16, y: u16, w: u16, hits: &mut Vec<(Rect, Hit)>) -> u16 {
-        let (page, _, Some(pl)) = self.page_parts().unwrap() else { return y };
-        let panel = Rect { x: x - 1, y, width: w + 2, height: 4 };
-        ui::fill(f, panel, SURFACE);
-        let ix = x + 1;
-        let iw = w.saturating_sub(2);
-        let keys = vec![ui::key("c"), Span::styled(" команда   ", ui::muted()), ui::key("p"), Span::styled(" плеєр", ui::muted())];
-        ui::section(f, Rect { x: ix, y: y + 1, width: iw, height: 1 }, "Команда і плеєр", "", keys, false);
+    /// Panel frame: background, header with `right` keys. Returns the body area.
+    fn panel(&self, f: &mut Frame, area: Rect, title: &str, right: Vec<Span<'static>>) -> Rect {
+        ui::fill(f, Rect { x: area.x - 1, y: area.y, width: area.width + 2, height: area.height + 4 }, SURFACE);
+        let inner = Rect { x: area.x + 1, y: area.y + 1, width: area.width.saturating_sub(2), height: 1 };
+        ui::section(f, inner, title, "", right, false);
+        Rect { y: area.y + 3, height: area.height, ..inner }
+    }
 
-        let half = iw / 2;
+    /// The chosen team and player; `c` opens the picker.
+    fn draw_choice(&self, f: &mut Frame, area: Rect, hits: &mut Vec<(Rect, Hit)>) {
+        let Some((page, _, Some(pl))) = self.page_parts() else { return };
+        let body = self.panel(f, area, "Команда і плеєр", ui::hint("c", "змінити"));
         let team = match pl.releases.get(page.rel) {
             Some(r) => vec![
                 Span::styled(r.team_names(), ui::bold()),
@@ -826,16 +792,46 @@ impl App {
             ],
             None => vec![Span::styled("—", ui::muted())],
         };
-        let left = Rect { x: ix, y: y + 2, width: half, height: 1 };
-        let right = Rect { x: ix + half, y: y + 2, width: iw - half, height: 1 };
-        f.render_widget(Line::from(team), left);
-        f.render_widget(Line::from(player), right);
-        hits.push((panel, Hit::Open(Modal::Source(1))));
-        hits.push((Rect { height: 2, ..right }, Hit::Open(Modal::Source(2))));
-        y + 5
+        let team_row = Rect { height: 1, ..body };
+        let player_row = Rect { y: body.y + 1, height: 1, ..body };
+        f.render_widget(Line::from(team), team_row);
+        f.render_widget(Line::from(player), player_row);
+        hits.push((Rect { x: area.x - 1, y: area.y, width: area.width + 2, height: area.height + 4 }, Hit::Open(Modal::Source(1))));
+        hits.push((player_row, Hit::Open(Modal::Source(2))));
     }
 
-    /// Rows the grid needs and its column count at width `w`.
+    /// The first related titles; `r` opens all of them.
+    fn draw_related(&self, f: &mut Frame, area: Rect, hits: &mut Vec<(Rect, Hit)>) {
+        let rels = self.relations();
+        let all = ui::hint("r", &format!("усі · {}", rels.len()));
+        let body = self.panel(f, area, "Пов'язані аніме", all);
+        hits.push((Rect { x: area.x - 1, y: area.y, width: area.width + 2, height: 3 }, Hit::Open(Modal::Related)));
+        let room = body.height as usize;
+        // All of them if they fit, otherwise one row less and "… ще N".
+        let shown = if rels.len() <= room { rels.len() } else { room - 1 };
+        for (i, r) in rels.iter().take(shown).enumerate() {
+            let row = Rect { y: body.y + i as u16, height: 1, ..body };
+            let label = r.label();
+            let title_w = (row.width as usize).saturating_sub(label.width() + 3);
+            f.render_widget(
+                Line::from(vec![
+                    Span::styled(crate::style::pad(r.anime.titles.main(), title_w), ui::bold()),
+                    Span::raw("   "),
+                    Span::styled(label.to_string(), ui::muted()),
+                ]),
+                row,
+            );
+            if let Some(id) = r.anime.reference() {
+                hits.push((row, Hit::Related(id)));
+            }
+        }
+        if rels.len() > shown {
+            let row = Rect { y: body.y + shown as u16, height: 1, ..body };
+            f.render_widget(Line::styled(format!("… ще {}", rels.len() - shown), ui::muted()), row);
+            hits.push((row, Hit::Open(Modal::Related)));
+        }
+    }
+
     /// Rows for the episode grid and its column count. The rows fit the
     /// longest release of the title, so switching teams keeps the layout still.
     fn episode_rows(&self, w: u16) -> (usize, usize) {
@@ -979,7 +975,7 @@ impl App {
                     })
                     .collect();
                 let overlay = ui::Overlay {
-                    title: "Сезони та пов'язані".into(),
+                    title: "Пов'язані аніме".into(),
                     aside: String::new(),
                     filter: None,
                     items,
