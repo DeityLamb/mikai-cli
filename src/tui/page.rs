@@ -388,6 +388,24 @@ impl App {
         [(tracks, track_sel), (teams, team_sel), (players, player_sel)]
     }
 
+    /// Most rows any column of the source modal can have for this title.
+    fn source_rows_max(&self) -> usize {
+        let Some((_, _, Some(pl))) = self.page_parts() else { return 1 };
+        let teams = ["voice", "sub"].iter().map(|k| pl.releases.iter().filter(|r| r.kind == *k).count()).max().unwrap_or(0);
+        let players = pl
+            .releases
+            .iter()
+            .map(|r| {
+                let mut names: Vec<&str> = r.episodes.iter().flat_map(|e| e.sources.iter().map(|s| s.provider.as_str())).collect();
+                names.sort_unstable();
+                names.dedup();
+                names.len()
+            })
+            .max()
+            .unwrap_or(0);
+        teams.max(players).max(2)
+    }
+
     /// Chooses row `i` of column `col`; the page follows right away.
     fn source_pick(&mut self, col: usize, i: usize) {
         match col {
@@ -818,9 +836,13 @@ impl App {
     }
 
     /// Rows the grid needs and its column count at width `w`.
+    /// Rows for the episode grid and its column count. The rows fit the
+    /// longest release of the title, so switching teams keeps the layout still.
     fn episode_rows(&self, w: u16) -> (usize, usize) {
         let Some((p, _, Some(pl))) = self.page_parts() else { return (1, 1) };
-        pl.releases.get(p.rel).map_or((1, 1), |rel| grid_shape(rel, w.saturating_sub(2)))
+        let cols = pl.releases.get(p.rel).map_or(1, |rel| grid_shape(rel, w.saturating_sub(2)).1);
+        let rows = pl.releases.iter().map(|r| grid_shape(r, w.saturating_sub(2)).0).max().unwrap_or(1);
+        (rows, cols)
     }
 
     /// Episode panel. Returns the scroll offset it used.
@@ -979,7 +1001,9 @@ impl App {
     fn draw_source_modal(&self, f: &mut Frame, area: Rect, active: usize) -> Vec<(Rect, Hit)> {
         let cols = self.source_columns();
         let w = 100.min(area.width.saturating_sub(4));
-        let rows_h = cols.iter().map(|(items, _)| items.len()).max().unwrap_or(1).clamp(1, area.height.saturating_sub(12) as usize) as u16;
+        // Sized for the longest column any choice can produce, so moving
+        // through tracks and teams never resizes the modal.
+        let rows_h = self.source_rows_max().max(cols.iter().map(|(items, _)| items.len()).max().unwrap_or(1)).clamp(1, area.height.saturating_sub(12) as usize) as u16;
         let h = rows_h + 8;
         let rect = Rect { x: area.x + (area.width - w) / 2, y: area.y + area.height.saturating_sub(h) / 3, width: w, height: h };
         f.render_widget(Clear, rect);
