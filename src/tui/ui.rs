@@ -101,6 +101,8 @@ pub fn section(f: &mut Frame, rect: Rect, title: &str, sub: &str, right: Vec<Spa
 pub struct Item {
     /// Digit or letter that picks the row directly.
     pub key: Option<String>,
+    /// Muted column before the label, e.g. an id.
+    pub pre: String,
     pub label: String,
     /// Right-aligned, muted.
     pub meta: String,
@@ -111,7 +113,7 @@ pub struct Item {
 
 impl Item {
     pub fn new(label: impl Into<String>, meta: impl Into<String>) -> Self {
-        Self { key: None, label: label.into(), meta: meta.into(), tag: None, dim: false }
+        Self { key: None, pre: String::new(), label: label.into(), meta: meta.into(), tag: None, dim: false }
     }
 }
 
@@ -125,6 +127,7 @@ pub fn rows(f: &mut Frame, rect: Rect, items: &[Item], sel: usize, bg: Color, ac
     let key_w = if has_keys { 4 } else { 0 };
     let meta_w = items.iter().map(|i| i.meta.width()).max().unwrap_or(0).min(rect.width as usize / 2);
     let tag_w = items.iter().filter_map(|i| i.tag.as_ref()).map(|(t, _)| t.width() + 2).max().unwrap_or(0);
+    let pre_w = items.iter().map(|i| i.pre.width()).max().map_or(0, |w| if w > 0 { w + 2 } else { 0 });
     let mut hits = vec![];
     for (row, (i, it)) in items.iter().enumerate().skip(start).take(h).enumerate() {
         let selected = i == sel;
@@ -135,7 +138,7 @@ pub fn rows(f: &mut Frame, rect: Rect, items: &[Item], sel: usize, bg: Color, ac
         });
         let r = Rect { x: rect.x, y: rect.y + row as u16, width: rect.width, height: 1 };
         // Two columns of air between the label and the meta.
-        let label_w = (rect.width as usize).saturating_sub(key_w + 1 + 2 + meta_w + tag_w + 2);
+        let label_w = (rect.width as usize).saturating_sub(key_w + 1 + pre_w + 2 + meta_w + tag_w + 2);
         let mut spans = vec![];
         if has_keys {
             let k = it.key.clone().unwrap_or_default();
@@ -148,6 +151,9 @@ pub fn rows(f: &mut Frame, rect: Rect, items: &[Item], sel: usize, bg: Color, ac
         } else {
             base
         };
+        if pre_w > 0 {
+            spans.push(Span::styled(format!(" {:>w$} ", it.pre, w = pre_w - 2), base.fg(MUTED)));
+        }
         spans.push(Span::styled(format!(" {}  ", pad(&it.label, label_w)), label_style));
         let meta = truncate(&it.meta, meta_w);
         spans.push(Span::styled(format!("{meta:>meta_w$}  ", meta_w = meta_w), base.fg(MUTED)));

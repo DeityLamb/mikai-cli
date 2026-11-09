@@ -20,7 +20,7 @@ mikai
 
 ```
 /search frieren        пошук, рядки нумеруються
-/view #1               сторінка тайтлу (або /view frieren)
+/view #1               сторінка тайтлу (або /view frieren — під вводом видно, що саме відкриється)
 /random                випадковий тайтл
 /schedule today        розклад
 /updates               новинки

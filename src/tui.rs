@@ -215,8 +215,51 @@ enum Msg {
     Append(u64, Lines),
     Done(u64, Result<Outcome>),
     Found(u64, Result<Vec<AnimeShort>>),
+    Suggested(u64, Result<Vec<Suggestion>>),
     History(Result<Vec<serde_json::Value>>),
     Teams(Result<Vec<Team>>),
+}
+
+/// What `/view <arg>` would open, shown while typing.
+#[derive(Clone)]
+struct Suggestion {
+    id: String,
+    title: String,
+    meta: String,
+}
+
+impl Suggestion {
+    fn from_short(a: &AnimeShort) -> Option<Self> {
+        Some(Self { id: a.reference()?, title: a.titles.main().to_string(), meta: suggestion_meta(&a.titles, a.format.as_deref(), a.year) })
+    }
+
+    fn from_detail(d: &AnimeDetail) -> Option<Self> {
+        Some(Self {
+            id: d.ids.mikai?.to_string(),
+            title: d.titles.main().to_string(),
+            meta: suggestion_meta(&d.titles, d.format.as_deref(), d.year),
+        })
+    }
+}
+
+fn suggestion_meta(t: &Titles, format: Option<&str>, year: Option<i64>) -> String {
+    [t.secondary().map(str::to_string), format.map(str::to_uppercase), year.map(|y| y.to_string())]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+#[derive(Default)]
+struct Suggest {
+    /// Argument the shown items belong to.
+    shown_for: String,
+    /// Argument being typed and when it last changed.
+    wanted: String,
+    changed: Option<Instant>,
+    requested: String,
+    generation: u64,
+    items: Vec<Suggestion>,
 }
 
 #[derive(Clone)]
@@ -280,6 +323,7 @@ struct App {
     team_names: std::collections::HashMap<i64, String>,
 
     palette: Option<Palette>,
+    suggest: Suggest,
     page: Option<page::Page>,
     /// Pages left by opening a related title; Esc returns to them.
     page_stack: Vec<page::Page>,
@@ -339,6 +383,7 @@ impl App {
             recent_cleared: saved.recent_cleared,
             team_names: Default::default(),
             palette: None,
+            suggest: Suggest::default(),
             page: None,
             page_stack: vec![],
             tick: 0,
@@ -434,6 +479,7 @@ impl App {
             }
             self.tick += 1;
             self.palette_search_tick();
+            self.suggest_tick();
         }
         Ok(())
     }
@@ -579,6 +625,14 @@ impl App {
                 }
                 self.save();
             }
+            Msg::Suggested(generation, res) => {
+                self.loading = self.loading.saturating_sub(1);
+                if generation == self.suggest.generation {
+                    self.suggest.items = res.unwrap_or_default();
+                    self.suggest.shown_for = self.suggest.requested.clone();
+                    self.ac_sel = 0;
+                }
+            }
             Msg::Found(generation, res) => {
                 self.loading = self.loading.saturating_sub(1);
                 if let Some(p) = &mut self.palette {
@@ -702,6 +756,60 @@ impl App {
             .collect()
     }
 
+    /// The argument of a `/view` being typed, if that is what's in the prompt.
+    fn view_arg(&self) -> Option<&str> {
+        let body = self.input.strip_prefix('/').or_else(|| self.input.strip_prefix('.'))?;
+        let (name, rest) = body.split_once(' ')?;
+        let name = name.to_lowercase();
+        let spec = find_command(&name).or_else(|| find_command(&keys::command_word(&name)))?;
+        (spec.name == "view").then(|| rest.trim_start())
+    }
+
+    /// Suggestions for the current `/view` argument, if they are up to date.
+    fn suggestions(&self) -> Option<&[Suggestion]> {
+        let arg = self.view_arg()?;
+        (!arg.is_empty()).then_some(self.suggest.items.as_slice())
+    }
+
+    /// Looks up what the typed `/view` argument points to, 250 ms after typing stops.
+    fn suggest_tick(&mut self) {
+        let arg = self.view_arg().unwrap_or("").trim().to_string();
+        if arg != self.suggest.wanted {
+            self.suggest.wanted = arg.clone();
+            self.suggest.changed = Some(Instant::now());
+        }
+        if arg.is_empty() {
+            self.suggest.items.clear();
+            self.suggest.shown_for.clear();
+            self.suggest.requested.clear();
+            return;
+        }
+        if arg == self.suggest.requested || self.suggest.changed.is_some_and(|t| t.elapsed() < Duration::from_millis(250)) {
+            return;
+        }
+        self.suggest.requested = arg.clone();
+        self.suggest.generation += 1;
+        let generation = self.suggest.generation;
+        let refs = self.anime_refs.clone();
+        self.spawn_raw(move |c| {
+            let res = (|| -> Result<Vec<Suggestion>> {
+                // `#N`, an id, `mal:21` or a link point at one title; anything else is a search.
+                let r = if let Some(n) = arg.strip_prefix('#') {
+                    let n: usize = n.parse().context("після # має бути номер")?;
+                    Some(refs.get(n.wrapping_sub(1)).cloned().with_context(|| format!("в останньому списку немає #{n}"))?)
+                } else {
+                    let r = crate::api::normalize_ref(&arg);
+                    (r.contains(':') || r.parse::<i64>().is_ok()).then_some(r)
+                };
+                Ok(match r {
+                    Some(r) => c.anime(&r).ok().as_ref().and_then(Suggestion::from_detail).into_iter().collect(),
+                    None => c.search(&cli::search_query(&arg, 8, 1))?.items.iter().filter_map(Suggestion::from_short).collect(),
+                })
+            })();
+            Msg::Suggested(generation, res)
+        });
+    }
+
     fn scroll_by(&mut self, delta: i64) {
         self.scroll = (self.scroll as i64 + delta).clamp(0, self.total_lines as i64) as usize;
     }
@@ -733,6 +841,36 @@ impl App {
         }
         if self.block_key(hk) {
             return;
+        }
+        // Picking what `/view` opens.
+        if let Some(n) = self.suggestions().map(<[Suggestion]>::len).filter(|n| *n > 0) {
+            let typed = self.view_arg().unwrap_or("").trim().to_string();
+            let pick = self.suggest.items.get(self.ac_sel.min(n - 1)).map(|s| s.id.clone());
+            match k.code {
+                KeyCode::Up if !k.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.ac_sel = self.ac_sel.saturating_sub(1);
+                    return;
+                }
+                KeyCode::Down if !k.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.ac_sel = (self.ac_sel + 1).min(n - 1);
+                    return;
+                }
+                KeyCode::Tab => {
+                    if let Some(id) = pick {
+                        self.set_input(format!("/view {id}"));
+                    }
+                    return;
+                }
+                // A typed title opens the highlighted match; exact refs run as typed.
+                KeyCode::Enter if self.suggest.shown_for == typed && !typed.starts_with('#') && crate::api::normalize_ref(&typed).parse::<i64>().is_err() && !typed.contains(':') => {
+                    if let Some(id) = pick {
+                        self.set_input(String::new());
+                        self.submit(format!("/view {id}"));
+                    }
+                    return;
+                }
+                _ => {}
+            }
         }
         let comps = self.completions();
         match if ctrl { hk.code } else { k.code } {
@@ -1198,6 +1336,8 @@ impl App {
         let comps = self.completions();
         if !comps.is_empty() && self.palette.is_none() {
             draw_completions(f, transcript, &comps, self.ac_sel.min(comps.len() - 1));
+        } else if self.palette.is_none() {
+            self.draw_suggestions(f, transcript);
         }
         if self.palette.is_some() {
             self.draw_palette(f, area);
@@ -1414,6 +1554,42 @@ impl App {
         if let Some(c) = layout.cursor {
             f.set_cursor_position(c);
         }
+    }
+}
+
+impl App {
+    /// What `/view <arg>` would open, right above the prompt.
+    fn draw_suggestions(&self, f: &mut Frame, above: Rect) {
+        let Some(arg) = self.view_arg().map(str::trim) else { return };
+        if arg.is_empty() {
+            return;
+        }
+        let fresh = self.suggest.shown_for == arg;
+        let items: Vec<ui::Item> = self
+            .suggest
+            .items
+            .iter()
+            .map(|s| {
+                let mut it = ui::Item::new(s.title.clone(), s.meta.clone());
+                it.pre = s.id.clone();
+                it.dim = !fresh;
+                it
+            })
+            .collect();
+        let h = (items.len() as u16).clamp(1, 8);
+        let w = 96.min(above.width.saturating_sub(4));
+        let rect = Rect { x: above.x + 1, y: above.y + above.height.saturating_sub(h + 1), width: w, height: h + 1 };
+        f.render_widget(Clear, rect);
+        ui::fill(f, rect, ui::OVERLAY);
+        let list = Rect { x: rect.x + 1, y: rect.y, width: rect.width - 2, height: h };
+        if items.is_empty() {
+            let msg = if fresh { "нічого не знайдено" } else { "шукаю…" };
+            f.render_widget(Span::styled(msg, ui::muted()), Rect { x: list.x + 1, ..list });
+        } else {
+            ui::rows(f, list, &items, self.ac_sel.min(items.len() - 1), ui::OVERLAY, fresh);
+        }
+        let hints = ui::hints(&[("↑↓", "вибір"), ("Tab", "вставити id"), ("⏎", "відкрити")]);
+        f.render_widget(Line::from(hints), Rect { x: rect.x + 2, y: rect.y + h, width: rect.width - 2, height: 1 });
     }
 }
 
